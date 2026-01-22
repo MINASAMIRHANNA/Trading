@@ -1,0 +1,227 @@
+{
+  "$defs": {
+    "BotIdentity": {
+      "description": "Identity of the producer.",
+      "properties": {
+        "bot_id": {
+          "minLength": 1,
+          "title": "Bot Id",
+          "type": "string"
+        },
+        "bot_role": {
+          "minLength": 1,
+          "title": "Bot Role",
+          "type": "string"
+        },
+        "bot_version": {
+          "minLength": 1,
+          "title": "Bot Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "bot_id",
+        "bot_role",
+        "bot_version"
+      ],
+      "title": "BotIdentity",
+      "type": "object"
+    },
+    "TraceContext": {
+      "properties": {
+        "decision_id": {
+          "description": "Stable id for a decision (UUID recommended)",
+          "minLength": 8,
+          "title": "Decision Id",
+          "type": "string"
+        },
+        "trace_id": {
+          "description": "End-to-end trace id (UUID recommended)",
+          "minLength": 8,
+          "title": "Trace Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "decision_id",
+        "trace_id"
+      ],
+      "title": "TraceContext",
+      "type": "object"
+    }
+  },
+  "additionalProperties": true,
+  "properties": {
+    "schema_version": {
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "timestamp_utc": {
+      "format": "date-time",
+      "title": "Timestamp Utc",
+      "type": "string"
+    },
+    "identity": {
+      "$ref": "#/$defs/BotIdentity"
+    },
+    "trace": {
+      "$ref": "#/$defs/TraceContext"
+    },
+    "event_type": {
+      "const": "TradeEvent",
+      "default": "TradeEvent",
+      "enum": [
+        "TradeEvent"
+      ],
+      "title": "Event Type",
+      "type": "string"
+    },
+    "symbol": {
+      "minLength": 3,
+      "title": "Symbol",
+      "type": "string"
+    },
+    "action": {
+      "enum": [
+        "OPEN",
+        "CLOSE",
+        "UPDATE",
+        "PARTIAL_CLOSE"
+      ],
+      "title": "Action",
+      "type": "string"
+    },
+    "order_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Order Id"
+    },
+    "position_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Position Id"
+    },
+    "price": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Price"
+    },
+    "qty": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Qty"
+    },
+    "fees": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Fees"
+    },
+    "slippage_bps": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Slippage Bps"
+    },
+    "latency_ms": {
+      "anyOf": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Latency Ms"
+    },
+    "exit_reason": {
+      "default": "UNKNOWN",
+      "enum": [
+        "TP",
+        "SL",
+        "TRAIL",
+        "MANUAL",
+        "RISK_KILL",
+        "TIMEOUT",
+        "ERROR",
+        "UNKNOWN"
+      ],
+      "title": "Exit Reason",
+      "type": "string"
+    },
+    "pnl_pct": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Pnl Pct"
+    },
+    "pnl_usd": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Pnl Usd"
+    }
+  },
+  "required": [
+    "identity",
+    "trace",
+    "symbol",
+    "action"
+  ],
+  "title": "TradeEvent",
+  "type": "object"
+}

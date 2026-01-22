@@ -1,0 +1,155 @@
+{
+  "$defs": {
+    "BotIdentity": {
+      "description": "Identity of the producer.",
+      "properties": {
+        "bot_id": {
+          "minLength": 1,
+          "title": "Bot Id",
+          "type": "string"
+        },
+        "bot_role": {
+          "minLength": 1,
+          "title": "Bot Role",
+          "type": "string"
+        },
+        "bot_version": {
+          "minLength": 1,
+          "title": "Bot Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "bot_id",
+        "bot_role",
+        "bot_version"
+      ],
+      "title": "BotIdentity",
+      "type": "object"
+    },
+    "TraceContext": {
+      "properties": {
+        "decision_id": {
+          "description": "Stable id for a decision (UUID recommended)",
+          "minLength": 8,
+          "title": "Decision Id",
+          "type": "string"
+        },
+        "trace_id": {
+          "description": "End-to-end trace id (UUID recommended)",
+          "minLength": 8,
+          "title": "Trace Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "decision_id",
+        "trace_id"
+      ],
+      "title": "TraceContext",
+      "type": "object"
+    }
+  },
+  "additionalProperties": true,
+  "properties": {
+    "schema_version": {
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "timestamp_utc": {
+      "format": "date-time",
+      "title": "Timestamp Utc",
+      "type": "string"
+    },
+    "identity": {
+      "$ref": "#/$defs/BotIdentity"
+    },
+    "trace": {
+      "$ref": "#/$defs/TraceContext"
+    },
+    "event_type": {
+      "const": "HealthEvent",
+      "default": "HealthEvent",
+      "enum": [
+        "HealthEvent"
+      ],
+      "title": "Event Type",
+      "type": "string"
+    },
+    "service_name": {
+      "minLength": 1,
+      "title": "Service Name",
+      "type": "string"
+    },
+    "status": {
+      "default": "OK",
+      "enum": [
+        "OK",
+        "DEGRADED",
+        "DOWN"
+      ],
+      "title": "Status",
+      "type": "string"
+    },
+    "ws_connected": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Ws Connected"
+    },
+    "queue_size": {
+      "anyOf": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Queue Size"
+    },
+    "db_ok": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Db Ok"
+    },
+    "notes": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Notes"
+    },
+    "metrics": {
+      "title": "Metrics",
+      "type": "object"
+    }
+  },
+  "required": [
+    "identity",
+    "trace",
+    "service_name"
+  ],
+  "title": "HealthEvent",
+  "type": "object"
+}
