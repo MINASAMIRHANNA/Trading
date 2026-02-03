@@ -1,0 +1,131 @@
+services:
+  # =========================================================
+  # Phase 3: Mina bots + monitors (Postgres PRIMARY)
+  # Start with:
+  #   docker compose -f docker-compose.yml -f docker-compose.bots.yml up -d --build
+  # =========================================================
+
+  mina_paper_monitor:
+    build:
+      context: ./services/mina_bot
+      dockerfile: Dockerfile
+    command: python execution_monitor.py
+    restart: unless-stopped
+    environment:
+      MINA_DB_BACKEND: postgres
+      TRADING_PG_DSN: postgresql://trading:trading@postgres:5432/trading
+      TRADING_PG_MIRROR: "1"
+      TRADING_PG_SCHEMA: mina_paper
+      BOT_ROLE: paper
+      BOT_ID: paper-1
+      BOT_VERSION: 1.0.0
+      DASHBOARD_URL: http://mina_dashboard_paper:8000
+      DASHBOARD_PUBLISH_URL: http://mina_dashboard_paper:8000/publish
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mina_dashboard_paper:
+        condition: service_started
+    volumes:
+      - ./services/mina_bot:/app
+    working_dir: /app
+
+  mina_paper_bot:
+    build:
+      context: ./services/mina_bot
+      dockerfile: Dockerfile
+    command: python services/paper_bot/main.py
+    restart: unless-stopped
+    environment:
+      MINA_DB_BACKEND: postgres
+      TRADING_PG_DSN: postgresql://trading:trading@postgres:5432/trading
+      TRADING_PG_MIRROR: "1"
+      TRADING_PG_SCHEMA: mina_paper
+      BOT_ROLE: paper
+      BOT_ID: paper-1
+      BOT_VERSION: 1.0.0
+      DASHBOARD_URL: http://mina_dashboard_paper:8000
+      DASHBOARD_PUBLISH_URL: http://mina_dashboard_paper:8000/publish
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mina_dashboard_paper:
+        condition: service_started
+    volumes:
+      - ./services/mina_bot:/app
+    working_dir: /app
+
+  mina_live_monitor:
+    build:
+      context: ./services/mina_bot
+      dockerfile: Dockerfile
+    command: python execution_monitor.py
+    restart: unless-stopped
+    environment:
+      MINA_DB_BACKEND: postgres
+      TRADING_PG_DSN: postgresql://trading:trading@postgres:5432/trading
+      TRADING_PG_MIRROR: "1"
+      TRADING_PG_SCHEMA: mina_live
+      BOT_ROLE: live
+      BOT_ID: live-1
+      BOT_VERSION: 1.0.0
+      DASHBOARD_URL: http://mina_dashboard_live:8001
+      DASHBOARD_PUBLISH_URL: http://mina_dashboard_live:8001/publish
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mina_dashboard_live:
+        condition: service_started
+    volumes:
+      - ./services/mina_bot:/app
+    working_dir: /app
+
+  mina_live_bot:
+    build:
+      context: ./services/mina_bot
+      dockerfile: Dockerfile
+    command: python services/live_bot/main.py
+    restart: unless-stopped
+    environment:
+      MINA_DB_BACKEND: postgres
+      TRADING_PG_DSN: postgresql://trading:trading@postgres:5432/trading
+      TRADING_PG_MIRROR: "1"
+      TRADING_PG_SCHEMA: mina_live
+      BOT_ROLE: live
+      BOT_ID: live-1
+      BOT_VERSION: 1.0.0
+      DASHBOARD_URL: http://mina_dashboard_live:8001
+      DASHBOARD_PUBLISH_URL: http://mina_dashboard_live:8001/publish
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mina_dashboard_live:
+        condition: service_started
+    volumes:
+      - ./services/mina_bot:/app
+    working_dir: /app
+
+  mina_pump_bot:
+    build:
+      context: ./services/mina_bot
+      dockerfile: Dockerfile
+    command: python services/pump_hunter_bot/main.py
+    restart: unless-stopped
+    environment:
+      MINA_DB_BACKEND: postgres
+      TRADING_PG_DSN: postgresql://trading:trading@postgres:5432/trading
+      TRADING_PG_MIRROR: "1"
+      TRADING_PG_SCHEMA: mina_pump
+      BOT_ROLE: pump
+      BOT_ID: pump-1
+      BOT_VERSION: 1.0.0
+      DASHBOARD_URL: http://mina_dashboard_pump:8002
+      DASHBOARD_PUBLISH_URL: http://mina_dashboard_pump:8002/publish
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mina_dashboard_pump:
+        condition: service_started
+    volumes:
+      - ./services/mina_bot:/app
+    working_dir: /app

@@ -1,0 +1,16 @@
+README.md
+pyproject.toml
+gateway_api/__init__.py
+gateway_api/main.py
+shared_contracts/__init__.py
+shared_contracts/common.py
+shared_contracts/health_event.py
+shared_contracts/signal_event.py
+shared_contracts/trade_event.py
+shared_contracts/version.py
+tests/test_contracts_roundtrip.py
+trading_gateway.egg-info/PKG-INFO
+trading_gateway.egg-info/SOURCES.txt
+trading_gateway.egg-info/dependency_links.txt
+trading_gateway.egg-info/requires.txt
+trading_gateway.egg-info/top_level.txt

@@ -1,0 +1,263 @@
+# Trading Monorepo — All-in-one stack (Core + Bots)
+# Starts: Postgres + Gateway + Brain (API/UI/Sync) + Mina dashboards + Mina bots/monitors (paper/live/pump)
+#
+# Quick start:
+#   docker compose -f docker-compose.allinone.yml up -d --build
+#   bash scripts/smoke_all.sh paper
+#   bash scripts/smoke_all.sh live
+#   bash scripts/smoke_all.sh pump
+#
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: trading-postgres-1
+    environment:
+      POSTGRES_USER: trading
+      POSTGRES_PASSWORD: trading
+      POSTGRES_DB: trading
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U trading -d trading"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  gateway_api:
+    build:
+      context: ./gateway
+      dockerfile: Dockerfile
+    ports:
+      - "8200:8200"
+    environment:
+      # Gateway DB (audit + events)
+      TRADING_PG_DSN: postgresql://trading:trading@postgres:5432/trading
+      # Upstreams
+      MINA_PAPER_URL: http://mina_dashboard_paper:8000
+      MINA_LIVE_URL: http://mina_dashboard_live:8001
+      MINA_PUMP_URL: http://mina_dashboard_pump:8002
+      BRAIN_API_URL: http://brain_api:8100
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  brain_api:
+    build:
+      context: ./services/brain
+      dockerfile: Dockerfile.api
+    ports:
+      - "8100:8100"
+    environment:
+      # IMPORTANT: explicit SQLAlchemy driver for psycopg v3
+      BRAIN_DB_DSN: postgresql+psycopg://trading:trading@postgres:5432/trading
+      BRAIN_DB_SCHEMA: brain
+      # Brain code uses these standard env vars internally. Without them it may fall back to SQLite
+      # and you'll see errors like: sqlite3.OperationalError: no such table: sync_state
+      DATABASE_URL: postgresql+psycopg://trading:trading@postgres:5432/trading
+      DB_SCHEMA: brain
+      # Source DB (Mina schemas in SAME Postgres)
+      BRAIN_SOURCE_DSN: postgresql+psycopg://trading:trading@postgres:5432/trading
+      # Defaults for sync
+      SYNC_DEFAULT_ROLE: paper
+      SYNC_DEFAULT_LIMIT: "500"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  brain_sync_worker:
+    build:
+      context: ./services/brain
+      dockerfile: Dockerfile.worker
+    environment:
+      BRAIN_DB_DSN: postgresql+psycopg://trading:trading@postgres:5432/trading
+      BRAIN_DB_SCHEMA: brain
+      # Worker uses DATABASE_URL/DB_SCHEMA internally to connect to the Brain DB.
+      DATABASE_URL: postgresql+psycopg://trading:trading@postgres:5432/trading
+      DB_SCHEMA: brain
+      BRAIN_SOURCE_DSN: postgresql+psycopg://trading:trading@postgres:5432/trading
+      BRAIN_SYNC_ROLES: paper,live,pump
+      BRAIN_SYNC_LIMIT: "500"
+      BRAIN_SYNC_INTERVAL_SEC: "60"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  brain_ui:
+    build:
+      context: ./services/brain/dashboard
+      dockerfile: Dockerfile
+    ports:
+      - "5173:5173"
+    environment:
+      # Vite proxy will hit the gateway (preferred) or brain_api directly
+      VITE_API_BASE: /api
+      VITE_PROXY_TARGET: http://gateway_api:8200
+    depends_on:
+      - gateway_api
+      - brain_api
+
+  mina_dashboard_paper:
+    build: ./services/mina_bot
+    command: uvicorn dashboard.app:app --host 0.0.0.0 --port 8000
+    ports:
+      - "8000:8000"
+    environment:
+      BOT_ROLE: paper
+      # Mina config reads TRADING_DB_BACKEND / MINA_DB_BACKEND
+      TRADING_DB_BACKEND: postgres
+      MINA_DB_BACKEND: postgres
+      DB_BACKEND: postgres
+      TRADING_PG_DSN: postgresql://trading:trading@postgres:5432/trading
+      TRADING_PG_SCHEMA: mina_paper
+      MODE: LIVE
+      USE_TESTNET: "true"
+      DASHBOARD_AUTH_ENABLED: "true"
+      DASHBOARD_USER: admin
+      DASHBOARD_PASS: admin
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  mina_dashboard_live:
+    build: ./services/mina_bot
+    command: uvicorn dashboard.app:app --host 0.0.0.0 --port 8001
+    ports:
+      - "8001:8001"
+    environment:
+      BOT_ROLE: live
+      TRADING_DB_BACKEND: postgres
+      MINA_DB_BACKEND: postgres
+      DB_BACKEND: postgres
+      TRADING_PG_DSN: postgresql://trading:trading@postgres:5432/trading
+      TRADING_PG_SCHEMA: mina_live
+      MODE: TEST
+      USE_TESTNET: "true"
+      DASHBOARD_AUTH_ENABLED: "true"
+      DASHBOARD_USER: admin
+      DASHBOARD_PASS: admin
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  mina_dashboard_pump:
+    build: ./services/mina_bot
+    command: uvicorn dashboard.app:app --host 0.0.0.0 --port 8002
+    ports:
+      - "8002:8002"
+    environment:
+      BOT_ROLE: pump
+      TRADING_DB_BACKEND: postgres
+      MINA_DB_BACKEND: postgres
+      DB_BACKEND: postgres
+      TRADING_PG_DSN: postgresql://trading:trading@postgres:5432/trading
+      TRADING_PG_SCHEMA: mina_pump
+      MODE: TEST
+      USE_TESTNET: "true"
+      DASHBOARD_AUTH_ENABLED: "true"
+      DASHBOARD_USER: admin
+      DASHBOARD_PASS: admin
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # Mina bots + monitors
+  mina_paper_bot:
+    build: ./services/mina_bot
+    command: python services/paper_bot/main.py
+    environment:
+      BOT_ROLE: paper
+      TRADING_DB_BACKEND: postgres
+      MINA_DB_BACKEND: postgres
+      DB_BACKEND: postgres
+      TRADING_PG_DSN: postgresql://trading:trading@postgres:5432/trading
+      TRADING_PG_SCHEMA: mina_paper
+      MODE: LIVE
+      USE_TESTNET: "true"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  mina_paper_monitor:
+    build: ./services/mina_bot
+    command: python execution_monitor.py
+    environment:
+      BOT_ROLE: paper
+      TRADING_DB_BACKEND: postgres
+      MINA_DB_BACKEND: postgres
+      DB_BACKEND: postgres
+      TRADING_PG_DSN: postgresql://trading:trading@postgres:5432/trading
+      TRADING_PG_SCHEMA: mina_paper
+      MODE: LIVE
+      USE_TESTNET: "true"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  mina_live_bot:
+    build: ./services/mina_bot
+    command: python services/live_bot/main.py
+    environment:
+      BOT_ROLE: live
+      TRADING_DB_BACKEND: postgres
+      MINA_DB_BACKEND: postgres
+      DB_BACKEND: postgres
+      TRADING_PG_DSN: postgresql://trading:trading@postgres:5432/trading
+      TRADING_PG_SCHEMA: mina_live
+      MODE: TEST
+      USE_TESTNET: "true"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  mina_live_monitor:
+    build: ./services/mina_bot
+    command: python execution_monitor.py
+    environment:
+      BOT_ROLE: live
+      TRADING_DB_BACKEND: postgres
+      MINA_DB_BACKEND: postgres
+      DB_BACKEND: postgres
+      TRADING_PG_DSN: postgresql://trading:trading@postgres:5432/trading
+      TRADING_PG_SCHEMA: mina_live
+      MODE: TEST
+      USE_TESTNET: "true"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  mina_pump_bot:
+    build: ./services/mina_bot
+    command: python services/pump_hunter_bot/main.py
+    environment:
+      BOT_ROLE: pump
+      TRADING_DB_BACKEND: postgres
+      MINA_DB_BACKEND: postgres
+      DB_BACKEND: postgres
+      TRADING_PG_DSN: postgresql://trading:trading@postgres:5432/trading
+      TRADING_PG_SCHEMA: mina_pump
+      MODE: TEST
+      USE_TESTNET: "true"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  mina_pump_monitor:
+    build: ./services/mina_bot
+    command: python execution_monitor.py
+    environment:
+      BOT_ROLE: pump
+      TRADING_DB_BACKEND: postgres
+      MINA_DB_BACKEND: postgres
+      DB_BACKEND: postgres
+      TRADING_PG_DSN: postgresql://trading:trading@postgres:5432/trading
+      TRADING_PG_SCHEMA: mina_pump
+      MODE: TEST
+      USE_TESTNET: "true"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  pgdata:

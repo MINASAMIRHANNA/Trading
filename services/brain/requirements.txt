@@ -1,0 +1,71 @@
+# FastAPI API server
+fastapi>=0.111.0
+uvicorn>=0.30.0
+python-multipart>=0.0.9
+
+# =========================================================
+# Trading Intelligence & Research Platform
+# Python >= 3.10 (Recommended: 3.11)
+# =========================================================
+
+# -------------------------
+# Core & Environment
+# -------------------------
+python-dotenv==1.0.1
+pydantic==2.8.2
+rich==13.8.1
+
+# -------------------------
+# Database & ORM
+# -------------------------
+SQLAlchemy==2.0.32
+alembic==1.13.2
+
+# -------------------------
+# Data Processing
+# -------------------------
+pandas==2.2.3
+numpy==1.26.4
+python-dateutil==2.9.0.post0
+
+# -------------------------
+# Binance (READ-ONLY)
+# -------------------------
+python-binance==1.0.19
+
+# -------------------------
+# Market Indicators
+# -------------------------
+ta==0.11.0
+
+# -------------------------
+# Machine Learning
+# -------------------------
+scikit-learn==1.5.1
+xgboost==2.1.1
+
+# -------------------------
+# Statistics & Simulation
+# -------------------------
+scipy==1.14.1
+
+# -------------------------
+# Visualization & Dashboard
+# -------------------------
+streamlit==1.38.0
+plotly==5.24.1
+
+# -------------------------
+# Utilities
+# -------------------------
+requests==2.32.3
+tqdm==4.66.5
+
+# -------------------------
+# Testing
+# -------------------------
+pytest==8.3.2
+openai==1.0.0
+
+# Postgres driver (for unified DB)
+psycopg[binary]>=3.2.0

@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+.pytest_cache/
+
+# Node
+node_modules/
+dist/
+build/
+
+# OS
+.DS_Store
+
+# Logs / DB / runtime
+logs/
+*.log
+*.sqlite
+*.db
+*.db-shm
+*.db-wal
+.pids/
+
+# IDE
+.vscode/
+.idea/
+
+# Env files
+ops/env/*.env
+!ops/env/*.example
+
+
+# DB pin files
+.db_path*

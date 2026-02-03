@@ -1,0 +1,4 @@
+# Root union requirements (keeps installs consistent)
+-r services/brain/requirements.txt
+-r services/mina_bot/requirements.txt
+-r gateway/requirements.txt

@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>dashboard</title>
+  </head>
+  <body>
+    <div id="root">
+  <div style="padding:24px;font-family:Inter,system-ui,sans-serif;color:#e6edf3;background:#0e1117;min-height:100vh;">
+    <div style="font-size:20px;font-weight:700;margin-bottom:8px;">Trading Dashboard</div>
+    <div style="opacity:0.8;">Loading UI… If this stays blank, open DevTools → Console and refresh (Cmd+Shift+R).</div>
+  </div>
+</div>
+<script>
+  // Show runtime errors on screen (helps when UI goes blank)
+  window.addEventListener('error', function(e){
+    try{
+      const el = document.getElementById('root');
+      if(!el) return;
+      const msg = (e && (e.message || (e.error && e.error.stack))) || 'Unknown error';
+      el.innerHTML = '<pre style="white-space:pre-wrap;word-break:break-word;padding:24px;color:#ffb4b4;background:#0e1117;min-height:100vh;">UI Error:\n' + msg + '</pre>';
+    }catch(_){}
+  });
+  window.addEventListener('unhandledrejection', function(e){
+    try{
+      const el = document.getElementById('root');
+      if(!el) return;
+      const msg = (e && e.reason && (e.reason.stack || e.reason.message || String(e.reason))) || 'Unhandled promise rejection';
+      el.innerHTML = '<pre style="white-space:pre-wrap;word-break:break-word;padding:24px;color:#ffb4b4;background:#0e1117;min-height:100vh;">UI Rejection:\n' + msg + '</pre>';
+    }catch(_){}
+  });
+</script>
+
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
