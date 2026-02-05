@@ -12,6 +12,7 @@ def seed(n: int = 20, symbol: str = "BTCUSDT"):
     """Insert demo TradeFeature rows for local testing."""
     n = max(1, min(int(n or 20), 500))
     now = datetime.now(timezone.utc)
+    base_id = int(now.timestamp() * 1000)
 
     inserted = 0
     for session in get_session():
@@ -29,7 +30,16 @@ def seed(n: int = 20, symbol: str = "BTCUSDT"):
                 "pnl_pct": pnl,
                 "market_join_valid": True,
             }
-            obj = TradeFeature(symbol=symbol, timestamp_utc=now, features=f)
+            obj = TradeFeature(
+                symbol=symbol,
+                timestamp_utc=now,
+                features=f,
+                source_role="paper",
+                source_trade_id=base_id + i + 1,
+                source_status="CLOSED",
+                source_closed_at_ms=base_id,
+                source_pnl=pnl,
+            )
             session.add(obj)
             inserted += 1
     return {"ok": True, "inserted": inserted, "symbol": symbol}

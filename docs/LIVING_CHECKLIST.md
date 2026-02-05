@@ -16,6 +16,8 @@
 - ✅ Batch-29 Manual Trades: إصلاح أخطاء monitor مع manual trades.
 - ✅ Batch-31 Brain Postgres Driver: اعتماد psycopg v3 (DSN + deps).
 - ✅ Batch-32 Brain Sync limit: توحيد signature + دعم limit في sync.
+- ✅ All-in-one stack + Postgres schemas + unified endpoints + smoke_unified_v2.
+- ✅ Pump Hunter heartbeat + /api/trades endpoint.
 
 ## Batch-35 (جاري) — All-in-one “Core + Bots”
 - [ ] إضافة docker-compose.allinone.yml (تشغيل كامل stack في ملف واحد)

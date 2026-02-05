@@ -26,7 +26,9 @@ import sys
 import time
 from datetime import datetime, timezone
 
-from database.engine import ensure_schema
+from database.base import Base
+from database.engine import ensure_schema, get_db_schema, get_engine
+from database.migrations import ensure_trade_features_columns
 from database.session import SessionLocal
 from ingestion.mina.sync_trades import sync_mina_trades
 
@@ -72,6 +74,15 @@ def _as_bool(env_name: str, default: bool = False) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
+def _bootstrap_db() -> None:
+    """Ensure schema + tables exist before worker cycles start."""
+    engine = get_engine(echo=False)
+    schema = get_db_schema()
+    ensure_schema(engine, schema)
+    Base.metadata.create_all(engine)
+    ensure_trade_features_columns(engine, schema)
+
+
 def main() -> int:
     # graceful shutdown
     signal.signal(signal.SIGTERM, _handle_stop)
@@ -84,10 +95,10 @@ def main() -> int:
 
     print(f"🧠 [brain_sync_worker] starting @ {_utc()} roles={roles} limit={limit} interval={interval}s dry_run={dry_run}")
 
-    # Ensure schema exists (will retry if DB not ready yet)
+    # Ensure schema + tables exist (will retry if DB not ready yet)
     while not _Stop.value:
         try:
-            ensure_schema()
+            _bootstrap_db()
             break
         except Exception as e:
             print(f"🧠 [brain_sync_worker] waiting for DB... err={type(e).__name__}: {e}")

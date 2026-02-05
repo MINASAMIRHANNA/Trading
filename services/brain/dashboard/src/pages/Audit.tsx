@@ -38,6 +38,7 @@ export default function Audit() {
   const [role, setRole] = useState<string>("all");
   const [action, setAction] = useState<string>("all");
   const [q, setQ] = useState<string>("");
+  const [traceId, setTraceId] = useState<string>("");
 
   const load = async () => {
     setLoading(true);
@@ -85,14 +86,16 @@ export default function Audit() {
 
   const filtered = useMemo(() => {
     const needle = q.trim().toLowerCase();
+    const traceNeedle = traceId.trim().toLowerCase();
     return items.filter((it) => {
       if (role !== "all" && (it.role || "") !== role) return false;
       if (action !== "all" && (it.action || "") !== action) return false;
+      if (traceNeedle && !String(it.trace_id || "").toLowerCase().includes(traceNeedle)) return false;
       if (!needle) return true;
       const blob = JSON.stringify(it).toLowerCase();
       return blob.includes(needle);
     });
-  }, [items, role, action, q]);
+  }, [items, role, action, q, traceId]);
 
   return (
     <Box>
@@ -135,6 +138,14 @@ export default function Audit() {
             ))}
           </Select>
         </FormControl>
+
+        <TextField
+          size="small"
+          label="Trace ID"
+          value={traceId}
+          onChange={(e) => setTraceId(e.target.value)}
+          sx={{ minWidth: 220 }}
+        />
 
         <TextField
           size="small"

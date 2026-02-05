@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { fetchOverview } from "../api/overview";
-import Grid from "@mui/material/Grid";
+import Grid from "@mui/material/GridLegacy";
 import { Paper, Typography } from "@mui/material";
 
 export default function Overview() {

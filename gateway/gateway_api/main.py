@@ -7,6 +7,7 @@ import uuid
 import time
 import hmac
 import hashlib
+import datetime as dt
 
 from typing import Literal, Optional, Dict, Any
 
@@ -14,8 +15,10 @@ import httpx
 import psycopg
 from psycopg.rows import dict_row
 from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi.encoders import jsonable_encoder
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 
 from gateway_api.contracts_v1 import json_schema as contracts_v1_schema
 
@@ -123,6 +126,92 @@ async def _audited_post_json(
         raise
 
 
+async def _audited_post_params(
+    *,
+    request: Request,
+    action: str,
+    role: Optional[str],
+    target_id: Optional[str],
+    url: str,
+    params: Optional[Dict[str, Any]] = None,
+):
+    trace_id = _trace_id_from_request(request)
+    headers = {"X-Trace-Id": trace_id}
+    req_json = {"params": params or {}}
+    try:
+        result = await _post_json(url, headers=headers, params=params)
+        audit_id = await _audit_write(
+            request=request,
+            action=action,
+            role=role,
+            target_id=target_id,
+            trace_id=trace_id,
+            request_json=req_json,
+            response_json=result if isinstance(result, dict) else {"result": result},
+            ok=True,
+        )
+        if isinstance(result, dict):
+            result = {**result, "trace_id": trace_id, "audit_id": audit_id}
+        return result
+    except HTTPException as e:
+        await _audit_write(
+            request=request,
+            action=action,
+            role=role,
+            target_id=target_id,
+            trace_id=trace_id,
+            request_json=req_json,
+            response_json={"error": e.detail},
+            ok=False,
+        )
+        raise
+
+
+async def _audited_get_json(
+    *,
+    request: Request,
+    action: str,
+    role: Optional[str],
+    target_id: Optional[str],
+    url: str,
+    headers: Optional[Dict[str, str]] = None,
+    params: Optional[Dict[str, Any]] = None,
+):
+    trace_id = _trace_id_from_request(request)
+    try:
+        headers = dict(headers or {})
+    except Exception:
+        headers = {}
+    headers.setdefault("X-Trace-Id", trace_id)
+    req_json = {"params": params or {}}
+    try:
+        result = await _fetch_json(url, headers=headers, params=params)
+        audit_id = await _audit_write(
+            request=request,
+            action=action,
+            role=role,
+            target_id=target_id,
+            trace_id=trace_id,
+            request_json=req_json,
+            response_json=result if isinstance(result, dict) else {"result": result},
+            ok=True,
+        )
+        if isinstance(result, dict):
+            result = {**result, "trace_id": trace_id, "audit_id": audit_id}
+        return result
+    except HTTPException as e:
+        await _audit_write(
+            request=request,
+            action=action,
+            role=role,
+            target_id=target_id,
+            trace_id=trace_id,
+            request_json=req_json,
+            response_json={"error": e.detail},
+            ok=False,
+        )
+        raise
+
 def _env(name: str, default: str) -> str:
     v = os.getenv(name)
     return v.strip() if v and v.strip() else default
@@ -136,6 +225,7 @@ AUDIT_ENABLED = True
 MINA_PAPER_URL = _env("MINA_PAPER_URL", "http://mina_dashboard_paper:8000")
 MINA_LIVE_URL = _env("MINA_LIVE_URL", "http://mina_dashboard_live:8001")
 MINA_PUMP_URL = _env("MINA_PUMP_URL", "http://mina_dashboard_pump:8002")
+MINA_SCHEMA_PREFIX = _env("MINA_SCHEMA_PREFIX", "mina_")
 
 ROLE_URLS: Dict[str, str] = {
     "paper": MINA_PAPER_URL,
@@ -148,6 +238,10 @@ def _validate_role(role: str) -> str:
     if r not in ROLE_URLS:
         raise HTTPException(status_code=404, detail="Unknown role")
     return r
+
+def _schema_for_role(role: str) -> str:
+    r = _validate_role(role)
+    return f"{MINA_SCHEMA_PREFIX}{r}"
 
 def _dash_url(role: str, path: str) -> str:
     r = _validate_role(role)
@@ -460,6 +554,68 @@ async def api_overview():
     # Proxy Brain API overview
     return await _fetch_json(f"{BRAIN_API_URL}/api/overview")
 
+@app.get("/api/decision")
+async def api_decision(request: Request):
+    """Proxy Brain decision endpoint."""
+    params = dict(request.query_params)
+    return await _fetch_json(f"{BRAIN_API_URL}/api/decision", params=params)
+
+@app.get("/api/ai-coach")
+async def api_ai_coach(request: Request):
+    params = dict(request.query_params)
+    return await _fetch_json(f"{BRAIN_API_URL}/api/ai-coach", params=params)
+
+@app.get("/api/daily-summary")
+async def api_daily_summary(request: Request):
+    params = dict(request.query_params)
+    return await _fetch_json(f"{BRAIN_API_URL}/api/daily-summary", params=params)
+
+@app.get("/api/daily-education")
+async def api_daily_education(request: Request):
+    params = dict(request.query_params)
+    return await _fetch_json(f"{BRAIN_API_URL}/api/daily-education", params=params)
+
+@app.get("/api/ml/importance")
+async def api_ml_importance(request: Request):
+    params = dict(request.query_params)
+    return await _fetch_json(f"{BRAIN_API_URL}/api/ml/importance", params=params)
+
+@app.get("/api/strategy-compare")
+async def api_strategy_compare(request: Request):
+    params = dict(request.query_params)
+    return await _fetch_json(f"{BRAIN_API_URL}/api/strategy-compare", params=params)
+
+@app.get("/api/strategy-ranking")
+async def api_strategy_ranking(request: Request):
+    params = dict(request.query_params)
+    return await _fetch_json(f"{BRAIN_API_URL}/api/strategy-ranking", params=params)
+
+@app.get("/api/execution-status")
+async def api_execution_status(request: Request):
+    params = dict(request.query_params)
+    return await _fetch_json(f"{BRAIN_API_URL}/api/execution-status", params=params)
+
+@app.get("/api/performance/by-regime")
+async def api_perf_by_regime(request: Request):
+    params = dict(request.query_params)
+    return await _fetch_json(f"{BRAIN_API_URL}/api/performance/by-regime", params=params)
+
+@app.post("/api/ai-chat")
+async def api_ai_chat(request: Request):
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    return await _post_json(f"{BRAIN_API_URL}/api/ai-chat", json_body=body)
+
+@app.post("/api/simulate")
+async def api_simulate(request: Request):
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    return await _post_json(f"{BRAIN_API_URL}/api/simulate", json_body=body)
+
 @app.get("/api/stack/health")
 async def api_stack_health():
     # Aggregate health from brain + 3 dashboards
@@ -502,6 +658,15 @@ async def api_audit_log(limit: int = 200):
 # -----------------------------
 
 EVENTS_TABLE = os.getenv("TRADING_EVENTS_TABLE", "shared_events")
+GATEWAY_SETTINGS_TABLE = "gateway.shared_settings"
+
+AUTOPILOT_MODES = ("OFF", "SHADOW", "TESTNET", "LIVE")
+AUTOPILOT_KEYS = {
+    "global": "autopilot_global_mode",
+    "paper": "autopilot_paper_mode",
+    "live": "autopilot_live_mode",
+    "pump": "autopilot_pump_mode",
+}
 
 def _ensure_events_table(dsn: str) -> None:
     ddl = f"""
@@ -518,6 +683,88 @@ def _ensure_events_table(dsn: str) -> None:
     with psycopg.connect(AUDIT_DSN, autocommit=True) as conn:
         with conn.cursor() as cur:
             cur.execute(ddl)
+
+def _ensure_gateway_settings_table(dsn: str) -> None:
+    ddl = f"""
+    CREATE SCHEMA IF NOT EXISTS gateway;
+    CREATE TABLE IF NOT EXISTS {GATEWAY_SETTINGS_TABLE} (
+      key         TEXT PRIMARY KEY,
+      value       TEXT NOT NULL,
+      updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+      updated_by  TEXT
+    );
+    """
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        with conn.cursor() as cur:
+            cur.execute(ddl)
+
+
+def _mode_rank(mode: str) -> int:
+    m = str(mode or "").strip().upper()
+    if m == "OFF":
+        return 0
+    if m == "SHADOW":
+        return 1
+    if m == "TESTNET":
+        return 2
+    if m == "LIVE":
+        return 3
+    return 0
+
+
+def _mode_from_rank(rank: int) -> str:
+    return ("OFF", "SHADOW", "TESTNET", "LIVE")[max(0, min(int(rank), 3))]
+
+
+def _normalize_mode(mode: str) -> str:
+    m = str(mode or "").strip().upper()
+    if m not in AUTOPILOT_MODES:
+        raise HTTPException(status_code=400, detail=f"invalid_mode: {mode}")
+    return m
+
+
+def _effective_mode(global_mode: str, role_mode: str) -> str:
+    g = _mode_rank(global_mode)
+    r = _mode_rank(role_mode)
+    return _mode_from_rank(min(g, r))
+
+
+def _get_gateway_setting(key: str, default: str = "OFF") -> str:
+    _ensure_gateway_settings_table(AUDIT_DSN)
+    with psycopg.connect(AUDIT_DSN, autocommit=True) as conn:
+        with conn.cursor() as cur:
+            cur.execute(f"SELECT value FROM {GATEWAY_SETTINGS_TABLE} WHERE key = %s", (key,))
+            row = cur.fetchone()
+            if not row:
+                return default
+            return str(row[0] or default)
+
+
+def _set_gateway_setting(key: str, value: str, updated_by: Optional[str] = None) -> None:
+    _ensure_gateway_settings_table(AUDIT_DSN)
+    with psycopg.connect(AUDIT_DSN, autocommit=True) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                INSERT INTO {GATEWAY_SETTINGS_TABLE} (key, value, updated_by)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (key)
+                DO UPDATE SET value = EXCLUDED.value, updated_at = now(), updated_by = EXCLUDED.updated_by;
+                """,
+                (key, value, updated_by),
+            )
+
+
+def _autopilot_state() -> Dict[str, Any]:
+    global_mode = _get_gateway_setting(AUTOPILOT_KEYS["global"], "OFF")
+    roles = {}
+    for role in ("paper", "live", "pump"):
+        role_mode = _get_gateway_setting(AUTOPILOT_KEYS[role], "OFF")
+        roles[role] = {
+            "role_mode": role_mode,
+            "effective_mode": _effective_mode(global_mode, role_mode),
+        }
+    return {"global_mode": global_mode, "roles": roles}
 
 async def _events_fetch(
     *,
@@ -561,6 +808,293 @@ async def _events_fetch(
                 return list(cur.fetchall())
 
     return await asyncio.to_thread(_run)
+
+
+def _events_last_id() -> int:
+    _ensure_events_table(AUDIT_DSN)
+    with psycopg.connect(AUDIT_DSN, autocommit=True) as conn:
+        with conn.cursor() as cur:
+            cur.execute(f"SELECT COALESCE(MAX(id), 0) FROM {EVENTS_TABLE}")
+            row = cur.fetchone()
+            return int(row[0] or 0)
+
+
+def _normalize_trade_status_filter(status: str) -> tuple[str, list]:
+    s = str(status or "").strip().upper()
+    if not s or s == "ALL":
+        return "", []
+    if s == "OPEN":
+        return "UPPER(status) = 'OPEN'", []
+    if s in ("CLOSED", "CLOSE", "DONE", "FILLED"):
+        return "UPPER(status) = 'CLOSED'", []
+    return "UPPER(status) = %s", [s]
+
+
+async def _trades_fetch(
+    *,
+    role: str,
+    limit: int = 50,
+    status: str | None = None,
+    symbol: str | None = None,
+):
+    role = _validate_role(role)
+    schema = _schema_for_role(role)
+    limit = max(1, min(int(limit or 50), 1000))
+
+    def _run():
+        with psycopg.connect(AUDIT_DSN, autocommit=True, row_factory=dict_row) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT column_name
+                    FROM information_schema.columns
+                    WHERE table_schema = %s AND table_name = 'trades'
+                    """,
+                    (schema,),
+                )
+                cols = {r["column_name"] for r in (cur.fetchall() or [])}
+                if not cols:
+                    raise RuntimeError("trades_table_missing")
+
+                where: list[str] = []
+                params: list[object] = []
+                if status:
+                    if "status" not in cols:
+                        raise RuntimeError("status_filter_not_supported")
+                    clause, extra = _normalize_trade_status_filter(status)
+                    if clause:
+                        where.append(clause)
+                        params.extend(extra)
+
+                if symbol:
+                    sym = str(symbol).strip().upper()
+                    if sym:
+                        if "symbol" in cols:
+                            where.append("symbol = %s")
+                            params.append(sym)
+                        elif "pair" in cols:
+                            where.append("pair = %s")
+                            params.append(sym)
+                        else:
+                            raise RuntimeError("symbol_filter_not_supported")
+
+                order_col = None
+                for cand in ("id", "closed_at_ms", "closed_at", "timestamp"):
+                    if cand in cols:
+                        order_col = cand
+                        break
+
+                q = f"SELECT * FROM {schema}.trades"
+                if where:
+                    q += " WHERE " + " AND ".join(where)
+                if order_col:
+                    q += f" ORDER BY {order_col} DESC"
+                q += " LIMIT %s"
+                params.append(limit)
+                cur.execute(q, params)
+                return list(cur.fetchall())
+
+    try:
+        return await asyncio.to_thread(_run)
+    except RuntimeError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail={"error": "trades_query_failed", "detail": str(e)})
+
+
+async def _trade_fetch_one(role: str, trade_id: int):
+    role = _validate_role(role)
+    schema = _schema_for_role(role)
+    try:
+        trade_id = int(trade_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="invalid_trade_id")
+
+    def _run():
+        with psycopg.connect(AUDIT_DSN, autocommit=True, row_factory=dict_row) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT column_name
+                    FROM information_schema.columns
+                    WHERE table_schema = %s AND table_name = 'trades'
+                    """,
+                    (schema,),
+                )
+                cols = {r["column_name"] for r in (cur.fetchall() or [])}
+                if not cols:
+                    raise RuntimeError("trades_table_missing")
+                id_col = "id" if "id" in cols else ("trade_id" if "trade_id" in cols else None)
+                if not id_col:
+                    raise RuntimeError("trade_id_column_missing")
+                q = f"SELECT * FROM {schema}.trades WHERE {id_col} = %s LIMIT 1"
+                cur.execute(q, (trade_id,))
+                return cur.fetchone()
+
+    try:
+        return await asyncio.to_thread(_run)
+    except RuntimeError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail={"error": "trade_query_failed", "detail": str(e)})
+
+
+def _parse_ts_ms(value: Optional[str]) -> Optional[int]:
+    if value is None:
+        return None
+    s = str(value).strip()
+    if not s:
+        return None
+    if s.isdigit():
+        n = int(s)
+        # if seconds, convert to ms
+        if n < 10**12:
+            n *= 1000
+        return n
+    return None
+
+
+def _ms_to_iso(ms: int) -> str:
+    try:
+        return dt.datetime.fromtimestamp(ms / 1000.0, tz=dt.timezone.utc).isoformat().replace("+00:00", "Z")
+    except Exception:
+        return str(ms)
+
+
+async def _equity_history_fetch(
+    *,
+    role: str,
+    limit: int = 200,
+    from_ts: str | None = None,
+    to_ts: str | None = None,
+):
+    role = _validate_role(role)
+    schema = _schema_for_role(role)
+    limit = max(1, min(int(limit or 200), 2000))
+
+    def _run():
+        with psycopg.connect(AUDIT_DSN, autocommit=True, row_factory=dict_row) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT column_name
+                    FROM information_schema.columns
+                    WHERE table_schema = %s AND table_name = 'equity_history'
+                    """,
+                    (schema,),
+                )
+                cols = {r["column_name"] for r in (cur.fetchall() or [])}
+                if not cols:
+                    raise RuntimeError("equity_history_table_missing")
+
+                num_col = "timestamp_ms" if "timestamp_ms" in cols else None
+                text_col = None
+                for cand in ("timestamp", "created_at", "date_utc"):
+                    if cand in cols:
+                        text_col = cand
+                        break
+
+                where: list[str] = []
+                params: list[object] = []
+                f_ms = _parse_ts_ms(from_ts)
+                t_ms = _parse_ts_ms(to_ts)
+                if num_col:
+                    if f_ms is not None:
+                        where.append(f"{num_col} >= %s")
+                        params.append(int(f_ms))
+                    if t_ms is not None:
+                        where.append(f"{num_col} <= %s")
+                        params.append(int(t_ms))
+                elif text_col:
+                    if from_ts:
+                        params.append(_ms_to_iso(f_ms) if f_ms is not None else str(from_ts))
+                        where.append(f"{text_col} >= %s")
+                    if to_ts:
+                        params.append(_ms_to_iso(t_ms) if t_ms is not None else str(to_ts))
+                        where.append(f"{text_col} <= %s")
+
+                order_col = num_col or text_col or "id"
+                q = f"SELECT * FROM {schema}.equity_history"
+                if where:
+                    q += " WHERE " + " AND ".join(where)
+                q += f" ORDER BY {order_col} ASC"
+                q += " LIMIT %s"
+                params.append(limit)
+                cur.execute(q, params)
+                return list(cur.fetchall())
+
+    try:
+        return await asyncio.to_thread(_run)
+    except RuntimeError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail={"error": "equity_history_query_failed", "detail": str(e)})
+
+
+async def _perf_metrics_fetch(
+    *,
+    role: str,
+    limit: int = 500,
+    from_ts: str | None = None,
+    to_ts: str | None = None,
+):
+    role = _validate_role(role)
+    schema = _schema_for_role(role)
+    limit = max(1, min(int(limit or 500), 5000))
+
+    def _run():
+        with psycopg.connect(AUDIT_DSN, autocommit=True, row_factory=dict_row) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT column_name
+                    FROM information_schema.columns
+                    WHERE table_schema = %s AND table_name = 'perf_metrics'
+                    """,
+                    (schema,),
+                )
+                cols = {r["column_name"] for r in (cur.fetchall() or [])}
+                if not cols:
+                    raise RuntimeError("perf_metrics_table_missing")
+
+                num_col = "created_at_ms" if "created_at_ms" in cols else None
+                text_col = "created_at" if "created_at" in cols else None
+
+                where: list[str] = []
+                params: list[object] = []
+                f_ms = _parse_ts_ms(from_ts)
+                t_ms = _parse_ts_ms(to_ts)
+                if num_col:
+                    if f_ms is not None:
+                        where.append(f"{num_col} >= %s")
+                        params.append(int(f_ms))
+                    if t_ms is not None:
+                        where.append(f"{num_col} <= %s")
+                        params.append(int(t_ms))
+                elif text_col:
+                    if from_ts:
+                        params.append(_ms_to_iso(f_ms) if f_ms is not None else str(from_ts))
+                        where.append(f"{text_col} >= %s")
+                    if to_ts:
+                        params.append(_ms_to_iso(t_ms) if t_ms is not None else str(to_ts))
+                        where.append(f"{text_col} <= %s")
+
+                order_col = num_col or text_col or "id"
+                q = f"SELECT * FROM {schema}.perf_metrics"
+                if where:
+                    q += " WHERE " + " AND ".join(where)
+                q += f" ORDER BY {order_col} DESC"
+                q += " LIMIT %s"
+                params.append(limit)
+                cur.execute(q, params)
+                return list(cur.fetchall())
+
+    try:
+        return await asyncio.to_thread(_run)
+    except RuntimeError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail={"error": "perf_metrics_query_failed", "detail": str(e)})
 
 @app.get("/api/events")
 async def api_events(
@@ -614,6 +1148,46 @@ async def api_events_stream(request: Request, since_id: int = 0, role: str | Non
                 yield f"data: {json.dumps({'error': str(e)})}\n\n"
             await asyncio.sleep(max(0.25, float(sleep_s)))
     return StreamingResponse(gen(), media_type="text/event-stream")
+
+
+# Unified aliases (prefer these for the unified dashboard)
+@app.get("/api/unified/events")
+async def api_unified_events(
+    limit: int = 200,
+    role: str | None = None,
+    event_type: str | None = None,
+    since_id: int | None = None,
+    order: str | None = None,
+):
+    return await api_events(limit=limit, role=role, event_type=event_type, since_id=since_id, order=order)
+
+@app.get("/api/unified/events/stream")
+async def api_unified_events_stream(
+    request: Request,
+    since_id: int = 0,
+    role: str | None = None,
+    event_type: str | None = None,
+    poll_s: float = 1.0,
+    interval_ms: int | None = None,
+    event_name: str | None = None,
+):
+    return await api_events_stream(
+        request,
+        since_id=since_id,
+        role=role,
+        event_type=event_type,
+        poll_s=poll_s,
+        interval_ms=interval_ms,
+        event_name=event_name,
+    )
+
+@app.get("/api/unified/events/last")
+async def api_unified_events_last():
+    try:
+        last_id = await asyncio.to_thread(_events_last_id)
+        return {"ok": True, "last_id": last_id}
+    except Exception as e:
+        return {"ok": False, "error": str(e), "last_id": 0}
 
 
 @app.post("/api/audit/{audit_id}/replay")
@@ -756,13 +1330,25 @@ async def api_unified_roles():
 
 @app.get("/api/unified/overview")
 async def api_unified_overview():
-    """Unified overview: Brain overview + per-role dashboard stats + small signals preview."""
-    out = {"schema_version": "v1", "brain": None, "dashboards": {}, "ts_utc": None}
-    # UTC timestamp
+    """Unified overview: Gateway + Brain + per-role dashboards + latest audit/events."""
+    out = {
+        "schema_version": "v2",
+        "ts_utc": None,
+        "gateway": {"status": "ok", "service": "gateway"},
+        "brain_api": None,
+        "brain": None,
+        "dashboards": {},
+        "audit": None,
+        "events": None,
+    }
     import datetime as _dt
     out["ts_utc"] = _dt.datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
 
-    # Brain overview
+    # Brain health + overview
+    try:
+        out["brain_api"] = await _fetch_json(f"{BRAIN_API_URL}/health")
+    except HTTPException as e:
+        out["brain_api"] = _http_exc_detail(e)
     try:
         out["brain"] = await _fetch_json(f"{BRAIN_API_URL}/api/overview")
     except HTTPException as e:
@@ -770,7 +1356,11 @@ async def api_unified_overview():
 
     headers = {"X-API-Key": DASHBOARD_API_KEY}
     for role, base in ROLE_URLS.items():
-        role_out = {"stats": None, "signals_preview": None}
+        role_out = {"stats": None, "signals_preview": None, "system_health": None}
+        try:
+            role_out["system_health"] = await _fetch_json(f"{base}/api/system_health", headers=headers)
+        except HTTPException as e:
+            role_out["system_health"] = _http_exc_detail(e)
         try:
             role_out["stats"] = await _fetch_json(f"{base}/api/stats", headers=headers)
         except HTTPException as e:
@@ -781,7 +1371,131 @@ async def api_unified_overview():
             role_out["signals_preview"] = _http_exc_detail(e)
         out["dashboards"][role] = role_out
 
+    # Latest audit/events (best-effort)
+    try:
+        if AUDIT_ENABLED:
+            rows = await asyncio.to_thread(fetch_audit_events, AUDIT_DSN, 5)
+            out["audit"] = {"ok": True, "items": rows}
+        else:
+            out["audit"] = {"ok": False, "error": "audit_disabled"}
+    except Exception as e:
+        out["audit"] = {"ok": False, "error": str(e)}
+
+    try:
+        rows = await _events_fetch(limit=5, order="desc")
+        out["events"] = {"ok": True, "items": rows}
+    except Exception as e:
+        out["events"] = {"ok": False, "error": str(e)}
+
     return out
+
+
+@app.get("/api/unified/autopilot")
+async def api_unified_autopilot_get():
+    return _autopilot_state()
+
+
+@app.post("/api/unified/autopilot")
+async def api_unified_autopilot_set_global(request: Request):
+    body = await request.json()
+    mode = _normalize_mode(body.get("global_mode"))
+    trace_id = _trace_id_from_request(request)
+    actor = _actor_from_request(request)
+
+    _set_gateway_setting(AUTOPILOT_KEYS["global"], mode, updated_by=actor)
+    resp = _autopilot_state()
+    audit_id = await _audit_write(
+        request=request,
+        action="AUTOPILOT_SET_GLOBAL",
+        role=None,
+        target_id="global",
+        trace_id=trace_id,
+        request_json={"global_mode": mode},
+        response_json=resp,
+        ok=True,
+    )
+    return {**resp, "ok": True, "trace_id": trace_id, "audit_id": audit_id}
+
+
+@app.post("/api/unified/autopilot/{role}")
+async def api_unified_autopilot_set_role(role: Role, request: Request):
+    body = await request.json()
+    mode = _normalize_mode(body.get("role_mode"))
+    trace_id = _trace_id_from_request(request)
+    actor = _actor_from_request(request)
+
+    _set_gateway_setting(AUTOPILOT_KEYS[role], mode, updated_by=actor)
+    resp = _autopilot_state()
+    audit_id = await _audit_write(
+        request=request,
+        action="AUTOPILOT_SET_ROLE",
+        role=role,
+        target_id=role,
+        trace_id=trace_id,
+        request_json={"role_mode": mode},
+        response_json=resp,
+        ok=True,
+    )
+    return {**resp, "ok": True, "trace_id": trace_id, "audit_id": audit_id}
+
+
+@app.post("/api/unified/sync/run")
+async def api_unified_sync_run(request: Request):
+    """Proxy a Brain sync run then refresh Brain dataset cache (audited)."""
+    params = dict(request.query_params)
+    role = str(params.get("role") or "paper")
+    sync_res = await _audited_post_params(
+        request=request,
+        action="SYNC_RUN",
+        role=role,
+        target_id=role,
+        url=f"{BRAIN_API_URL}/api/sync/run",
+        params=params,
+    )
+    # Refresh dataset cache (best-effort, not audited)
+    trace_val = _trace_id_from_request(request)
+    if isinstance(sync_res, dict) and sync_res.get("trace_id"):
+        trace_val = str(sync_res.get("trace_id"))
+    headers = {"X-Trace-Id": trace_val}
+    refresh_res = await _post_json(f"{BRAIN_API_URL}/api/admin/dataset/refresh", headers=headers)
+    return {"ok": True, "sync": sync_res, "refresh": refresh_res}
+
+@app.post("/api/unified/sync/reset")
+async def api_unified_sync_reset(request: Request, role: str = "paper"):
+    """Proxy Brain sync reset (audited)."""
+    params = dict(request.query_params)
+    params.setdefault("role", role)
+    res = await _audited_post_params(
+        request=request,
+        action="SYNC_RESET",
+        role=str(params.get("role") or role),
+        target_id=str(params.get("role") or role),
+        url=f"{BRAIN_API_URL}/api/sync/reset",
+        params=params,
+    )
+    return res
+
+@app.post("/api/unified/sync/cleanup")
+async def api_unified_sync_cleanup(request: Request, role: Optional[str] = None):
+    """Proxy Brain sync cleanup (audited)."""
+    params = dict(request.query_params)
+    if role and "role" not in params:
+        params["role"] = role
+    role_val = str(params.get("role")) if params.get("role") is not None else None
+    res = await _audited_post_params(
+        request=request,
+        action="SYNC_CLEANUP",
+        role=role_val,
+        target_id=role_val,
+        url=f"{BRAIN_API_URL}/api/sync/cleanup",
+        params=params,
+    )
+    return res
+
+@app.get("/api/unified/sync/status")
+async def api_unified_sync_status(role: str = "paper"):
+    """Proxy Brain sync status for a role."""
+    return await _fetch_json(f"{BRAIN_API_URL}/api/sync/status", params={"role": role})
 
 @app.get("/api/unified/{role}/snapshot")
 async def api_unified_role_snapshot(role: Role):
@@ -835,6 +1549,64 @@ async def api_unified_role_positions(role: Role):
     headers = {"X-API-Key": DASHBOARD_API_KEY}
     return await _fetch_json(f"{base}/api/positions", headers=headers)
 
+@app.get("/api/unified/{role}/trades")
+async def api_unified_role_trades(role: Role, limit: int = 50, status: str | None = None, symbol: str | None = None):
+    rows = await _trades_fetch(role=role, limit=limit, status=status, symbol=symbol)
+    return {"ok": True, "schema": _schema_for_role(role), "items": jsonable_encoder(rows), "count": len(rows)}
+
+@app.get("/api/unified/{role}/trades/{trade_id}")
+async def api_unified_role_trade_detail(role: Role, trade_id: int):
+    row = await _trade_fetch_one(role, trade_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="trade_not_found")
+    return {"ok": True, "schema": _schema_for_role(role), "item": jsonable_encoder(row)}
+
+@app.get("/api/unified/{role}/equity_history")
+async def api_unified_equity_history(
+    role: Role,
+    limit: int = 200,
+    from_ts: str | None = None,
+    to_ts: str | None = None,
+):
+    schema = _schema_for_role(role)
+    try:
+        rows = await _equity_history_fetch(role=role, limit=limit, from_ts=from_ts, to_ts=to_ts)
+    except HTTPException as e:
+        return {
+            "ok": False,
+            "schema": schema,
+            "items": [],
+            "count": 0,
+            "error": _http_exc_detail(e),
+        }
+    if not rows:
+        return {
+            "ok": False,
+            "schema": schema,
+            "items": [],
+            "count": 0,
+            "error": "equity_history_not_available",
+        }
+    return {"ok": True, "schema": schema, "items": jsonable_encoder(rows), "count": len(rows)}
+
+@app.get("/api/unified/{role}/perf_metrics")
+async def api_unified_perf_metrics(
+    role: Role,
+    limit: int = 500,
+    from_ts: str | None = None,
+    to_ts: str | None = None,
+):
+    rows = await _perf_metrics_fetch(role=role, limit=limit, from_ts=from_ts, to_ts=to_ts)
+    return {"ok": True, "schema": _schema_for_role(role), "items": jsonable_encoder(rows), "count": len(rows)}
+
+@app.get("/api/unified/{role}/commands/history")
+async def api_unified_commands_history(role: Role, limit: int = 50):
+    base = ROLE_URLS.get(role)
+    if not base:
+        raise HTTPException(status_code=404, detail="Unknown role")
+    headers = {"X-API-Key": DASHBOARD_API_KEY}
+    return await _fetch_json(f"{base}/api/commands", headers=headers, params={"limit": int(limit)})
+
 @app.get("/api/unified/{role}/signals")
 async def api_unified_role_signals(role: Role, limit: int = 30, status: str | None = None):
     base = ROLE_URLS.get(role)
@@ -845,6 +1617,14 @@ async def api_unified_role_signals(role: Role, limit: int = 30, status: str | No
     if status:
         params["status"] = status
     return await _fetch_json(f"{base}/api/signals", headers=headers, params=params)
+
+@app.get("/api/unified/{role}/signals/{signal_id}")
+async def api_unified_signal_detail(role: Role, signal_id: int):
+    base = ROLE_URLS.get(role)
+    if not base:
+        raise HTTPException(status_code=404, detail="Unknown role")
+    headers = {"X-API-Key": DASHBOARD_API_KEY}
+    return await _fetch_json(f"{base}/api/signals/{int(signal_id)}", headers=headers)
 @app.get("/api/unified/{role}/signals/{signal_id}/decision")
 async def unified_signal_decision(role: str, signal_id: int):
     """Best-effort decision precheck for a Mina signal (fetches recent signals and matches by id)."""
@@ -937,6 +1717,139 @@ async def api_unified_role_logs(role: Role, limit: int = 200):
         raise HTTPException(status_code=404, detail="Unknown role")
     headers = {"X-API-Key": DASHBOARD_API_KEY}
     return await _fetch_json(f"{base}/api/logs", headers=headers, params={"limit": int(limit)})
+
+
+@app.get("/api/unified/{role}/settings")
+async def api_unified_role_settings(role: Role, request: Request):
+    base = ROLE_URLS.get(role)
+    if not base:
+        raise HTTPException(status_code=404, detail="Unknown role")
+    headers = {"X-API-Key": DASHBOARD_API_KEY}
+    return await _audited_get_json(
+        request=request,
+        action="SETTINGS_GET",
+        role=role,
+        target_id=None,
+        url=f"{base}/api/settings",
+        headers=headers,
+    )
+
+
+@app.post("/api/unified/{role}/settings")
+async def api_unified_role_settings_update(role: Role, request: Request):
+    base = ROLE_URLS.get(role)
+    if not base:
+        raise HTTPException(status_code=404, detail="Unknown role")
+    try:
+        body = await request.json()
+        if not isinstance(body, dict):
+            raise HTTPException(status_code=400, detail="Body must be an object")
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+    headers = {"X-API-Key": DASHBOARD_API_KEY}
+    return await _audited_post_json(
+        request=request,
+        action="SETTINGS_SET",
+        role=role,
+        target_id=None,
+        url=f"{base}/api/settings",
+        headers=headers,
+        json_body=body,
+    )
+
+
+@app.get("/api/unified/{role}/env_secrets")
+async def api_unified_role_env_secrets(role: Role, request: Request):
+    base = ROLE_URLS.get(role)
+    if not base:
+        raise HTTPException(status_code=404, detail="Unknown role")
+    headers = {"X-API-Key": DASHBOARD_API_KEY}
+    return await _audited_get_json(
+        request=request,
+        action="ENV_SECRETS_GET",
+        role=role,
+        target_id=None,
+        url=f"{base}/api/env_secrets",
+        headers=headers,
+    )
+
+
+@app.post("/api/unified/{role}/env_secrets")
+async def api_unified_role_env_secrets_update(role: Role, request: Request):
+    base = ROLE_URLS.get(role)
+    if not base:
+        raise HTTPException(status_code=404, detail="Unknown role")
+    try:
+        body = await request.json()
+        if not isinstance(body, dict):
+            raise HTTPException(status_code=400, detail="Body must be an object")
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+    headers = {"X-API-Key": DASHBOARD_API_KEY}
+    return await _audited_post_json(
+        request=request,
+        action="ENV_SECRETS_SET",
+        role=role,
+        target_id=None,
+        url=f"{base}/api/env_secrets",
+        headers=headers,
+        json_body=body,
+    )
+
+
+@app.post("/api/unified/{role}/control/restart_bot")
+async def api_unified_control_restart_bot(role: Role, request: Request):
+    base = ROLE_URLS.get(role)
+    if not base:
+        raise HTTPException(status_code=404, detail="Unknown role")
+    headers = {"X-API-Key": DASHBOARD_API_KEY}
+    return await _audited_post_json(
+        request=request,
+        action="CONTROL_RESTART_BOT",
+        role=role,
+        target_id="restart_bot",
+        url=f"{base}/api/control/restart_bot",
+        headers=headers,
+        json_body={},
+    )
+
+
+@app.post("/api/unified/{role}/control/restart_monitor")
+async def api_unified_control_restart_monitor(role: Role, request: Request):
+    base = ROLE_URLS.get(role)
+    if not base:
+        raise HTTPException(status_code=404, detail="Unknown role")
+    headers = {"X-API-Key": DASHBOARD_API_KEY}
+    return await _audited_post_json(
+        request=request,
+        action="CONTROL_RESTART_MONITOR",
+        role=role,
+        target_id="restart_monitor",
+        url=f"{base}/api/control/restart_monitor",
+        headers=headers,
+        json_body={},
+    )
+
+
+@app.post("/api/unified/{role}/control/clear_kill_switch")
+async def api_unified_control_clear_kill_switch(role: Role, request: Request):
+    base = ROLE_URLS.get(role)
+    if not base:
+        raise HTTPException(status_code=404, detail="Unknown role")
+    headers = {"X-API-Key": DASHBOARD_API_KEY}
+    return await _audited_post_json(
+        request=request,
+        action="CONTROL_CLEAR_KILL_SWITCH",
+        role=role,
+        target_id="clear_kill_switch",
+        url=f"{base}/api/control/clear_kill_switch",
+        headers=headers,
+        json_body={},
+    )
 
 @app.post("/api/unified/{role}/signals/{signal_id}/approve")
 async def api_unified_signal_approve(role: Role, signal_id: int, request: Request):
@@ -1080,6 +1993,65 @@ async def unified_suggest_signal_from_decision(role: Role, request: Request):
 
     return JSONResponse(upstream)
 
+@app.post("/api/unified/{role}/commands/close_all")
+async def api_unified_command_close_all(role: Role, request: Request):
+    """Queue CLOSE_ALL_POSITIONS for the selected role."""
+    base = ROLE_URLS.get(role)
+    if not base:
+        raise HTTPException(status_code=404, detail="Unknown role")
+    try:
+        body = await request.json()
+        if not isinstance(body, dict):
+            body = {}
+    except Exception:
+        body = {}
+
+    reason = str(body.get("reason") or "close_all").strip()
+    json_body = {"cmd": "CLOSE_ALL_POSITIONS", "params": {"reason": reason}}
+    headers = {"X-API-Key": DASHBOARD_API_KEY}
+    return await _audited_post_json(
+        request=request,
+        action="COMMAND_QUEUE",
+        role=role,
+        target_id="CLOSE_ALL_POSITIONS",
+        url=f"{base}/api/commands/queue",
+        headers=headers,
+        json_body=json_body,
+    )
+
+@app.post("/api/unified/{role}/commands/kill_switch")
+async def api_unified_command_kill_switch(role: Role, request: Request):
+    """Toggle KILL_SWITCH_ON / KILL_SWITCH_OFF for the selected role."""
+    base = ROLE_URLS.get(role)
+    if not base:
+        raise HTTPException(status_code=404, detail="Unknown role")
+    try:
+        body = await request.json()
+        if not isinstance(body, dict):
+            body = {}
+    except Exception:
+        body = {}
+
+    enabled_raw = body.get("enabled", True)
+    enabled = bool(enabled_raw)
+    if isinstance(enabled_raw, str):
+        enabled = enabled_raw.strip().lower() in ("1", "true", "yes", "on")
+
+    reason_default = "kill_switch_on" if enabled else "kill_switch_off"
+    reason = str(body.get("reason") or reason_default).strip()
+    cmd = "KILL_SWITCH_ON" if enabled else "KILL_SWITCH_OFF"
+    json_body = {"cmd": cmd, "params": {"reason": reason, "enabled": enabled}}
+    headers = {"X-API-Key": DASHBOARD_API_KEY}
+    return await _audited_post_json(
+        request=request,
+        action="COMMAND_QUEUE",
+        role=role,
+        target_id=cmd,
+        url=f"{base}/api/commands/queue",
+        headers=headers,
+        json_body=json_body,
+    )
+
 @app.post("/api/unified/{role}/commands")
 async def api_unified_queue_command(role: Role, request: Request):
     """Queue a command into the selected dashboard role (for execution_monitor/risk_monitor)."""
@@ -1118,6 +2090,28 @@ async def mina_proxy(role: Role, path: str, request: Request):
     params = dict(request.query_params)
 
     return await _fetch_json(upstream, headers=headers, params=params)
+
+
+@app.post("/api/mina/{role}/{path:path}")
+async def mina_proxy_post(role: Role, path: str, request: Request):
+    """
+    Proxy Mina dashboard /api/* POST endpoints via Gateway using X-API-Key.
+    Example:
+      /api/mina/pump/pump/candidates/reject -> http://mina_dashboard_pump:8002/api/pump/candidates/reject
+    """
+    base = ROLE_URLS.get(role)
+    if not base:
+        raise HTTPException(status_code=404, detail="Unknown role")
+
+    upstream = f"{base}/api/{path}".rstrip("/")
+    headers = {"X-API-Key": DASHBOARD_API_KEY}
+
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+
+    return await _post_json(upstream, headers=headers, json_body=body)
 
 
 # ---------------------------
@@ -1183,3 +2177,11 @@ async def api_fallback_to_brain(path: str, request: Request):
             raise HTTPException(status_code=404, detail="Not Found")
 
     return await _proxy_to_brain(path, request)
+
+
+# ---------------------------
+# Serve Unified UI (static SPA)
+# ---------------------------
+UI_DIST_DIR = os.getenv("UI_DIST_DIR", "/app/ui_dist")
+if os.path.isdir(UI_DIST_DIR):
+    app.mount("/", StaticFiles(directory=UI_DIST_DIR, html=True), name="ui")

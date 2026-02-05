@@ -30,6 +30,7 @@ export default function Events() {
   const [role, setRole] = useState<string>("all");
   const [etype, setEtype] = useState<string>("all");
   const [q, setQ] = useState<string>("");
+  const [traceId, setTraceId] = useState<string>("");
 
   const [streaming, setStreaming] = useState(false);
   const [streamStatus, setStreamStatus] = useState<string>("offline");
@@ -130,14 +131,19 @@ export default function Events() {
 
   const filtered = useMemo(() => {
     const needle = q.trim().toLowerCase();
+    const traceNeedle = traceId.trim().toLowerCase();
     return items.filter((it) => {
       if (role !== "all" && it.bot_role !== role) return false;
       if (etype !== "all" && it.event_type !== etype) return false;
+      if (traceNeedle) {
+        const trace = String(it?.data?.trace_id || it?.data?.traceId || "").toLowerCase();
+        if (!trace.includes(traceNeedle)) return false;
+      }
       if (!needle) return true;
       const blob = JSON.stringify(it).toLowerCase();
       return blob.includes(needle);
     });
-  }, [items, role, etype, q]);
+  }, [items, role, etype, q, traceId]);
 
   const roles = useMemo(() => {
     const s = new Set<string>();
@@ -196,6 +202,7 @@ export default function Events() {
           </Select>
         </FormControl>
 
+        <TextField size="small" label="Trace ID" value={traceId} onChange={(e) => setTraceId(e.target.value)} sx={{ minWidth: 220 }} />
         <TextField size="small" label="Search" value={q} onChange={(e) => setQ(e.target.value)} sx={{ minWidth: 260 }} />
 
         <Button variant="contained" onClick={load} disabled={loading}>

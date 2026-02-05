@@ -12,7 +12,7 @@ export default function AICoach() {
 
   useEffect(() => {
     api
-      .get("/ai-coach/?symbol=BTCUSDT")
+      .get("/ai-coach?symbol=BTCUSDT")
       .then((r) => setCoach(r.data))
       .catch(() => setCoach({ advice: ["Failed to load AI Coach"] }));
   }, []);
@@ -33,7 +33,6 @@ export default function AICoach() {
     </Paper>
   );
 }
-
 
 
 

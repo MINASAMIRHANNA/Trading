@@ -3,6 +3,8 @@ import pandas as pd
 from database.session import get_session
 from database.models.trade_features import TradeFeature
 
+VALID_ROLES = ("paper", "live", "pump")
+
 try:
     from ingestion.mina.sync_trades import sync_mina_trades
 except Exception:  # pragma: no cover
@@ -45,7 +47,10 @@ def load_feature_dataset(
     rows: list[dict] = []
 
     for session in get_session():
-        query = session.query(TradeFeature)
+        query = session.query(TradeFeature).filter(
+            TradeFeature.source_trade_id > 0,
+            TradeFeature.source_role.in_(VALID_ROLES),
+        )
 
         if symbol:
             query = query.filter(TradeFeature.symbol == symbol)

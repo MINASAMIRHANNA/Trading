@@ -27,8 +27,8 @@ services:
 
   gateway_api:
     build:
-      context: ./gateway
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: gateway/Dockerfile
     ports:
       - "8200:8200"
     environment:
@@ -53,6 +53,7 @@ services:
       # IMPORTANT: explicit SQLAlchemy driver for psycopg v3
       BRAIN_DB_DSN: postgresql+psycopg://trading:trading@postgres:5432/trading
       BRAIN_DB_SCHEMA: brain
+      GATEWAY_API_URL: http://gateway_api:8200
       # Brain code uses these standard env vars internally. Without them it may fall back to SQLite
       # and you'll see errors like: sqlite3.OperationalError: no such table: sync_state
       DATABASE_URL: postgresql+psycopg://trading:trading@postgres:5432/trading
@@ -85,6 +86,7 @@ services:
         condition: service_healthy
 
   brain_ui:
+    profiles: ["dev"]
     build:
       context: ./services/brain/dashboard
       dockerfile: Dockerfile

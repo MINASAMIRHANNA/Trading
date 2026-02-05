@@ -60,7 +60,8 @@ def get_engine(echo: bool = False, *, schema: str | None = None) -> Engine:
         target = (schema or get_db_schema()).strip()
         if not _valid_schema_name(target):
             raise ValueError(f"Invalid schema name: {target!r}")
-        connect_args = {"options": f"-csearch_path={target},public"}
+        # Use a strict search_path (no public) to avoid accidental cross-schema access.
+        connect_args = {"options": f"-csearch_path={target}"}
         engine_execution_options = {"schema_translate_map": {None: target}}
 
     engine = create_engine(
@@ -86,7 +87,7 @@ def get_engine(echo: bool = False, *, schema: str | None = None) -> Engine:
         def _set_search_path(dbapi_connection, _connection_record):
             try:
                 cursor = dbapi_connection.cursor()
-                cursor.execute(f'SET search_path TO "{target}", public')
+                cursor.execute(f'SET search_path TO "{target}"')
                 cursor.close()
             except Exception:
                 pass

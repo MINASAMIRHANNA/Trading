@@ -12,6 +12,7 @@ Usage:
 """
 
 import argparse
+import os
 import json
 import time
 from datetime import datetime, timezone
@@ -294,6 +295,13 @@ def scan_once(db: DatabaseManager, model: ModelManager) -> Tuple[int, List[Dict[
 
 
 def main():
+    role = (os.getenv("BOT_ROLE") or "").strip().lower()
+    if role and role != "pump":
+        print(f"[PumpHunter] Refusing to run (BOT_ROLE={role}); pump-only service.")
+        return
+    if not role:
+        os.environ["BOT_ROLE"] = "pump"
+
     ap = argparse.ArgumentParser()
     ap.add_argument("--db", default="", help="path to bot_data.db")
     ap.add_argument("--once", action="store_true", help="run one scan then exit")
@@ -317,15 +325,23 @@ def main():
 
     while True:
         try:
+            hb = _utc_ms()
+            hb_iso = _utc_iso()
+            try:
+                db.set_setting("last_heartbeat", hb_iso, bump_version=False, audit=False)
+                db.set_setting("bot_heartbeat", hb_iso, bump_version=False, audit=False)
+                print(f"[PumpHunter] heartbeat settings updated: {hb_iso}")
+            except Exception:
+                pass
+
             enabled = _as_bool(_get_setting(db, "pump_hunter_enabled", "TRUE"), True)
             if not enabled:
-                db.update_pump_hunter_state(heartbeat_ms=_utc_ms(), last_error="DISABLED")
+                db.update_pump_hunter_state(heartbeat_ms=hb, last_error="DISABLED")
                 time.sleep(5)
                 if args.once:
                     return
                 continue
 
-            hb = _utc_ms()
             db.update_pump_hunter_state(heartbeat_ms=hb)
 
             # HealthEvent contract (throttled)

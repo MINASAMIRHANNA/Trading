@@ -14,34 +14,52 @@ def build_system_health_payload(
 ) -> Dict[str, Any]:
     """Build the /api/system_health response payload."""
 
+    role = ""
+    try:
+        role = str(db.get_setting("BOT_ROLE") or os.getenv("BOT_ROLE") or "").strip().lower()
+    except Exception:
+        role = str(os.getenv("BOT_ROLE") or "").strip().lower()
+    if role == "arena":
+        role = "paper"
+
     last_beat = db.get_setting("last_heartbeat") or db.get_setting("bot_heartbeat")
     is_online = False
     last_seen_seconds = 999999
 
-    if last_beat:
+    def _iso_to_ms(val: Any) -> int:
         try:
-            last_time = datetime.fromisoformat(str(last_beat).replace("Z", "+00:00"))
-            if last_time.tzinfo is None:
-                last_time = last_time.replace(tzinfo=timezone.utc)
-            now = datetime.now(timezone.utc)
-            diff = now - last_time.astimezone(timezone.utc)
-            last_seen_seconds = diff.total_seconds()
+            t = datetime.fromisoformat(str(val).replace("Z", "+00:00"))
+            if t.tzinfo is None:
+                t = t.replace(tzinfo=timezone.utc)
+            return int(t.astimezone(timezone.utc).timestamp() * 1000)
+        except Exception:
+            return 0
+
+    now_ms = int(time.time() * 1000)
+    settings_hb_ms = _iso_to_ms(last_beat) if last_beat else 0
+    pump_hb_ms = 0
+    try:
+        if hasattr(db, "get_pump_hunter_state"):
+            st = db.get_pump_hunter_state() or {}
+            pump_hb_ms = int(st.get("last_heartbeat_ms") or 0)
+    except Exception:
+        pump_hb_ms = 0
+
+    if role == "pump":
+        hb_ms = max(settings_hb_ms, pump_hb_ms)
+        if hb_ms > 0:
+            last_seen_seconds = int((now_ms - hb_ms) / 1000)
             if last_seen_seconds < 60:
                 is_online = True
-        except Exception:
-            pass
     else:
-        # Pump Hunter fallback (heartbeat stored in pump_hunter_state)
-        try:
-            if hasattr(db, "get_pump_hunter_state"):
-                st = db.get_pump_hunter_state() or {}
-                hb_ms = int(st.get("last_heartbeat_ms") or 0)
-                if hb_ms > 0:
-                    last_seen_seconds = int((time.time() * 1000 - hb_ms) / 1000)
-                    if last_seen_seconds < 60:
-                        is_online = True
-        except Exception:
-            pass
+        if settings_hb_ms > 0:
+            last_seen_seconds = int((now_ms - settings_hb_ms) / 1000)
+            if last_seen_seconds < 60:
+                is_online = True
+        elif pump_hb_ms > 0:
+            last_seen_seconds = int((now_ms - pump_hb_ms) / 1000)
+            if last_seen_seconds < 60:
+                is_online = True
 
     db_path = getattr(db, "db_file", None) or os.path.join(project_root, "bot_data.db")
     db_size_mb = 0.0

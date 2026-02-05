@@ -197,6 +197,19 @@ def _get_mode_cached(ttl_sec: float = 2.0) -> str:
         _mode_cache = "PAPER"
         return _mode_cache
 
+def _kill_switch_active() -> bool:
+    """Return True if kill_switch setting is enabled (blocks new opens only)."""
+    global _dbm
+    try:
+        from database import DatabaseManager
+        if _dbm is None:
+            _dbm = DatabaseManager(getattr(cfg, "DB_FILE", None))
+        ks = _dbm.get_setting("kill_switch", "0")
+        s = str(ks or "").strip().lower()
+        return s in {"1", "true", "yes", "y", "on"}
+    except Exception:
+        return False
+
 
 
 
@@ -443,6 +456,10 @@ def place_market_order(
     side = str(side).upper().strip()
     if side not in {"BUY", "SELL"}:
         return {"ok": False, "error": f"Invalid side: {side}"}
+
+    if _kill_switch_active():
+        print("[EXEC] ⛔ kill_switch active — blocking new market order")
+        return {"ok": False, "error": "kill_switch_active"}
 
     try:
         qty_f = float(qty)

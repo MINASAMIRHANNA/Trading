@@ -12,7 +12,7 @@ import {
   TextField,
   Typography,
 } from "@mui/material";
-import { type UnifiedRole, queueUnifiedCommand } from "../api/unified";
+import { type UnifiedRole, queueUnifiedCommand, queueUnifiedCloseAll, queueUnifiedKillSwitch } from "../api/unified";
 
 const COMMANDS = [
   "CLOSE_ALL_POSITIONS",
@@ -41,6 +41,36 @@ export default function MinaCommands() {
       setSnack({ open: true, msg: `Queued ${cmd} (audit_id=${res?.audit_id ?? "?"})`, severity: "success" });
     } catch (e: any) {
       setSnack({ open: true, msg: String(e?.message || e || "Command failed"), severity: "error" });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const submitCloseAll = async () => {
+    setLoading(true);
+    try {
+      const res = await queueUnifiedCloseAll(role, reason);
+      setLast(res);
+      setSnack({ open: true, msg: `Queued CLOSE_ALL (audit_id=${res?.audit_id ?? "?"})`, severity: "success" });
+    } catch (e: any) {
+      setSnack({ open: true, msg: String(e?.message || e || "Close all failed"), severity: "error" });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const submitKillSwitch = async (enabled: boolean) => {
+    setLoading(true);
+    try {
+      const res = await queueUnifiedKillSwitch(role, enabled, reason);
+      setLast(res);
+      setSnack({
+        open: true,
+        msg: `Queued ${enabled ? "KILL_SWITCH_ON" : "KILL_SWITCH_OFF"} (audit_id=${res?.audit_id ?? "?"})`,
+        severity: "success",
+      });
+    } catch (e: any) {
+      setSnack({ open: true, msg: String(e?.message || e || "Kill switch failed"), severity: "error" });
     } finally {
       setLoading(false);
     }
@@ -80,6 +110,18 @@ export default function MinaCommands() {
 
         <Button variant="contained" onClick={() => void submit()} disabled={loading}>
           Send
+        </Button>
+
+        <Button variant="outlined" onClick={() => void submitCloseAll()} disabled={loading}>
+          Close All
+        </Button>
+
+        <Button variant="outlined" color="error" onClick={() => void submitKillSwitch(true)} disabled={loading}>
+          Kill Switch ON
+        </Button>
+
+        <Button variant="outlined" color="success" onClick={() => void submitKillSwitch(false)} disabled={loading}>
+          Kill Switch OFF
         </Button>
       </Box>
 

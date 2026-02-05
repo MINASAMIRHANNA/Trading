@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import os
 import time
+from functools import lru_cache
 from typing import Generator, Optional
 
 from sqlalchemy.orm import Session
@@ -32,10 +33,6 @@ def get_db() -> Generator[Session, None, None]:
         db.close()
 
 
-_DATASET_CACHE = None
-_DATASET_CACHE_TS = 0.0
-
-
 def _cache_ttl_seconds() -> int:
     raw = os.getenv("DATASET_CACHE_TTL_S", "30")
     try:
@@ -44,22 +41,31 @@ def _cache_ttl_seconds() -> int:
         return 30
 
 
-def _dataset_all_cached():
-    """Cached full feature dataset with TTL (default 30s)."""
-    global _DATASET_CACHE, _DATASET_CACHE_TS
+def _dataset_cache_bucket() -> int:
     ttl = _cache_ttl_seconds()
     if ttl <= 0:
-        return load_feature_dataset()
-    now = time.time()
-    if _DATASET_CACHE is None or (now - _DATASET_CACHE_TS) > ttl:
-        _DATASET_CACHE = load_feature_dataset()
-        _DATASET_CACHE_TS = now
-    return _DATASET_CACHE
+        return 0
+    return int(time.time() // ttl)
+
+
+@lru_cache(maxsize=4)
+def _dataset_all_cached(bucket: int):
+    """Cached full feature dataset (TTL bucketed + clearable)."""
+    _ = bucket
+    return load_feature_dataset()
 
 
 def get_dataset(symbol: Optional[str] = None):
     """Return the feature dataset, optionally filtered by symbol."""
-    df = _dataset_all_cached()
+    df = _dataset_all_cached(_dataset_cache_bucket())
     if symbol and hasattr(df, "columns") and "symbol" in df.columns:
         return df[df["symbol"] == symbol].copy()
     return df
+
+
+def clear_dataset_cache() -> None:
+    _dataset_all_cached.cache_clear()
+
+
+# Backward-compatible cache clear hook used by admin/sync endpoints.
+get_dataset.cache_clear = clear_dataset_cache  # type: ignore[attr-defined]

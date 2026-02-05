@@ -1944,6 +1944,20 @@ async def command_monitor_task():
                                 if order_side is None:
                                     raise ValueError(f"Invalid side: {exec_payload.get('side') or exec_payload.get('decision') or ''}")
 
+                            # Kill switch: block opening new positions only (closing commands must still work elsewhere)
+                            try:
+                                ks = str(db.get_setting("kill_switch") or "").strip().lower()
+                                if ks in ("1", "true", "yes", "on"):
+                                    log("⛔ EXECUTE_SIGNAL blocked (kill_switch=1).", "SYSTEM")
+                                    try:
+                                        if inbox_id:
+                                            db.mark_signal_inbox_executed(inbox_id, note="Blocked by kill switch")
+                                    except Exception:
+                                        pass
+                                    continue
+                            except Exception:
+                                pass
+
                             
                             
                             # Sprint 5: idempotency for approved executions (skip if trade already exists for same signal_key)
@@ -2282,6 +2296,8 @@ def system_health_check():
                         bump_version=False,
                         audit=False,
                     )
+                    # Clear the request to avoid restart loops on next boot
+                    db.set_setting("restart_bot_req", "", bump_version=False, audit=False)
                 except Exception:
                     pass
                 print("[SYSTEM] 🔁 Restart requested from Dashboard. Exiting now...")

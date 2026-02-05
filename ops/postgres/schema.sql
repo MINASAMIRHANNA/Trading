@@ -42,6 +42,13 @@ CREATE INDEX IF NOT EXISTS idx_shared_logs_role_time ON shared_logs(bot_role, cr
 -- Gateway audit log
 CREATE SCHEMA IF NOT EXISTS gateway;
 
+CREATE TABLE IF NOT EXISTS gateway.shared_settings (
+  key         TEXT PRIMARY KEY,
+  value       TEXT NOT NULL,
+  updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_by  TEXT
+);
+
 CREATE TABLE IF NOT EXISTS gateway.audit_log (
   id            BIGSERIAL PRIMARY KEY,
   ts_utc         TIMESTAMPTZ NOT NULL DEFAULT now(),

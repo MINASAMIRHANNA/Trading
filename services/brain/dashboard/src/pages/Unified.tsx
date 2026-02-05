@@ -447,18 +447,18 @@ const onForceCloseAll = async () => {
 <Typography variant="subtitle1">Raw snapshot JSON</Typography>
 <JsonBlock value={snapshot ?? { note: "No snapshot yet" }} />
       </Paper>
-      <Snackbar
-        open={!!toast}
-        autoHideDuration={3500}
-        onClose={() => setToast(null)}
-        anchorOrigin={{ vertical: "bottom", horizontal: "center" }}
-      >
-        {toast ? (
+      {toast ? (
+        <Snackbar
+          open
+          autoHideDuration={3500}
+          onClose={() => setToast(null)}
+          anchorOrigin={{ vertical: "bottom", horizontal: "center" }}
+        >
           <Alert severity={toast.severity} onClose={() => setToast(null)} sx={{ width: "100%" }}>
             {toast.message}
           </Alert>
-        ) : null}
-      </Snackbar>
+        </Snackbar>
+      ) : null}
     </Box>
   );
 }

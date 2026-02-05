@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+cd "$ROOT" || true
 set -euo pipefail
 
 BASE="${GATEWAY_URL:-http://localhost:8200}"

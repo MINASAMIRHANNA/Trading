@@ -8,6 +8,7 @@ Dashboard (FastAPI)
 """
 
 import os
+import time
 import sys
 import json
 import math
@@ -1340,6 +1341,10 @@ async def get_settings():
         "mode",
         "kill_switch",
         "kill_switch_reason",
+        "active_strategy",
+        "strategy_params_json",
+        "strategy_last_changed_utc",
+        "strategy_changed_by",
         "scalp_size_usd",
         "swing_size_usd",
         "max_trade_usd",
@@ -1979,6 +1984,53 @@ async def api_db_ready():
     except Exception as e:
         from fastapi import HTTPException
         raise HTTPException(status_code=500, detail=f"db not ready: {e}")
+
+
+# =========================================
+# 📈 TRADES (Unified list)
+# =========================================
+@app.get("/api/trades")
+async def api_trades(status: str = "ALL", limit: int = 200, symbol: str = None):
+    status_norm = str(status or "ALL").strip().upper()
+    if status_norm not in ("OPEN", "CLOSED", "ALL"):
+        status_norm = "ALL"
+
+    try:
+        limit_n = int(limit or 200)
+    except Exception:
+        limit_n = 200
+    if limit_n < 1:
+        limit_n = 1
+    if limit_n > 1000:
+        limit_n = 1000
+
+    sym = str(symbol or "").upper().strip()
+
+    where = []
+    params = []
+    if status_norm != "ALL":
+        where.append("status = ?")
+        params.append(status_norm)
+    if sym:
+        where.append("symbol = ?")
+        params.append(sym)
+
+    sql = "SELECT * FROM trades"
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY id DESC LIMIT ?"
+    params.append(limit_n)
+
+    try:
+        with db.lock:
+            cur = db.conn.cursor()
+            cur.execute(sql, tuple(params))
+            rows = cur.fetchall()
+        items = [_row_to_dict(r) for r in rows]
+        schema = getattr(db, "pg_schema", None) or os.getenv("MINA_PG_SCHEMA") or os.getenv("TRADING_PG_SCHEMA")
+        return {"ok": True, "schema": schema, "items": items, "count": len(items)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"trades query failed: {e}")
 
 
 # =========================================

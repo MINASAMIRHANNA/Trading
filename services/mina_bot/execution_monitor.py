@@ -94,6 +94,14 @@ class ExecutionMonitor:
         self.client = _NoPingClient(api_key, api_secret, testnet=False)
         _configure_futures_endpoints(self.client, bool(getattr(cfg, "USE_TESTNET", True)))
 
+        try:
+            self.bot_role = str(getattr(cfg, "BOT_ROLE", "") or os.getenv("BOT_ROLE") or "").strip().lower()
+        except Exception:
+            self.bot_role = str(os.getenv("BOT_ROLE") or "").strip().lower()
+        if self.bot_role == "arena":
+            self.bot_role = "paper"
+        self.is_pump = self.bot_role == "pump"
+
         self.running = True
         self._last_health_event_ms = 0
 
@@ -679,6 +687,13 @@ class ExecutionMonitor:
                         os._exit(3)
                 except Exception:
                     pass
+
+                if self.is_pump:
+                    if not getattr(self, "_pump_warned", False):
+                        print("[EXEC_MON] Pump role detected; heartbeat-only mode (no execution).")
+                        self._pump_warned = True
+                    time.sleep(self.CHECK_INTERVAL)
+                    continue
 
 
                 ts = datetime.now().strftime("%H:%M:%S")
@@ -1792,10 +1807,6 @@ class ExecutionMonitor:
             return
 
         wallet, unreal, equity = self._get_futures_equity()
-        if equity <= 0:
-            self._last_snapshot_ts = now
-            return
-
         meta = {
             "source": "execution_monitor",
             "active_trades": int(active_trades_count),
@@ -1803,6 +1814,18 @@ class ExecutionMonitor:
             "wallet_balance": wallet,
             "unrealized_pnl": unreal,
         }
+
+        if equity <= 0:
+            fallback = self._fallback_equity_from_trades()
+            if fallback is None:
+                self._last_snapshot_ts = now
+                return
+            equity, closed_count = fallback
+            meta["source"] = "execution_monitor_fallback"
+            meta["closed_trades"] = int(closed_count or 0)
+            meta["wallet_balance"] = 0.0
+            meta["unrealized_pnl"] = 0.0
+            meta["note"] = "fallback_equity_from_closed_trades"
         self._save_equity_snapshot(total_balance=equity, unrealized_pnl=unreal, meta=meta)
         self._last_snapshot_ts = now
 
@@ -1834,6 +1857,27 @@ class ExecutionMonitor:
             pass
 
         return 0.0, 0.0, 0.0
+
+    def _fallback_equity_from_trades(self):
+        """Best-effort equity fallback when API keys are unavailable."""
+        try:
+            conn = getattr(self.db, "conn", None)
+            if conn is None:
+                return None
+            lock = getattr(self.db, "lock", None)
+            sql = "SELECT SUM(pnl) AS pnl_sum, COUNT(*) AS c FROM trades WHERE status='CLOSED'"
+            if lock:
+                with lock:
+                    row = conn.execute(sql).fetchone()
+            else:
+                row = conn.execute(sql).fetchone()
+            if not row:
+                return None
+            pnl_sum = float(row[0] or 0.0)
+            cnt = int(row[1] or 0)
+            return pnl_sum, cnt
+        except Exception:
+            return None
 
     def _save_equity_snapshot(self, total_balance: float, unrealized_pnl: float, meta: dict) -> None:
         # New API (database.new.py)

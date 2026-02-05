@@ -4,6 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from api.router import api_router
 from database.base import Base
 from database.engine import ensure_schema, get_db_schema, get_engine
+from database.migrations import ensure_trade_features_columns
 
 
 def bootstrap_db() -> None:
@@ -18,6 +19,7 @@ def bootstrap_db() -> None:
     schema = get_db_schema()
     ensure_schema(engine, schema)
     Base.metadata.create_all(engine)
+    ensure_trade_features_columns(engine, schema)
 
 
 bootstrap_db()

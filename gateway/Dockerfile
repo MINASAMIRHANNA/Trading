@@ -1,3 +1,10 @@
+FROM node:20-alpine AS ui
+WORKDIR /ui
+COPY services/brain/dashboard/package.json services/brain/dashboard/package-lock.json* ./
+RUN npm ci
+COPY services/brain/dashboard/ ./
+RUN npm run build
+
 FROM python:3.11-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -6,11 +13,12 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-COPY requirements.txt /app/requirements.txt
+COPY gateway/requirements.txt /app/requirements.txt
 RUN pip install --upgrade pip \
     && pip install -r /app/requirements.txt
 
-COPY . /app
+COPY gateway /app
+COPY --from=ui /ui/dist /app/ui_dist
 
 EXPOSE 8200
 

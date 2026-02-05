@@ -8,21 +8,23 @@ import {
   Typography,
 } from "@mui/material";
 
-const Overview = lazy(() => import("../pages/Overview"));
-const Unified = lazy(() => import("../pages/Unified"));
-const Simulator = lazy(() => import("../pages/Simulator"));
-const RegimePerformance = lazy(() => import("../pages/RegimePerformance"));
-const MLExplainability = lazy(() => import("../pages/MLExplainability"));
-const DailySummary = lazy(() => import("../pages/DailySummary"));
-const AICoach = lazy(() => import("../pages/AICoach"));
-const StrategyComparison = lazy(() => import("../pages/StrategyComparison"));
-const AICoachChat = lazy(() => import("../pages/AICoachChat"));
-const DecisionCenter = lazy(() => import("../pages/DecisionCenter"));
-const Audit = lazy(() => import("../pages/Audit"));
-const Events = lazy(() => import("../pages/Events"));
+const UnifiedOverview = lazy(() => import("../pages/UnifiedOverview"));
 const MinaSignals = lazy(() => import("../pages/MinaSignals"));
-const MinaPositions = lazy(() => import("../pages/MinaPositions"));
+const TradesPositions = lazy(() => import("../pages/TradesPositions"));
+const Performance = lazy(() => import("../pages/Performance"));
 const MinaCommands = lazy(() => import("../pages/MinaCommands"));
+const AuditEvents = lazy(() => import("../pages/AuditEvents"));
+const BrainHub = lazy(() => import("../pages/BrainHub"));
+const ControlCenter = lazy(() => import("../pages/ControlCenter"));
+const SettingsCenter = lazy(() => import("../pages/SettingsCenter"));
+const PumpCenter = lazy(() => import("../pages/PumpCenter"));
+const AICoachChat = lazy(() => import("../pages/AICoachChat"));
+const AICoach = lazy(() => import("../pages/AICoach"));
+const Autopilot = lazy(() => import("../pages/Autopilot"));
+const Simulator = lazy(() => import("../pages/Simulator"));
+const StrategyComparison = lazy(() => import("../pages/StrategyComparison"));
+const DailySummary = lazy(() => import("../pages/DailySummary"));
+const DailyEducationPage = lazy(() => import("../pages/DailyEducationPage"));
 
 const drawerWidth = 240;
 
@@ -31,38 +33,42 @@ export default function DashboardLayout() {
 
   const Current = useMemo(() => {
     switch (page) {
-      case "unified":
-        return Unified;
       case "overview":
-        return Overview;
+        return UnifiedOverview;
+      case "signals":
+        return MinaSignals;
+      case "trades_positions":
+        return TradesPositions;
+      case "performance":
+        return Performance;
+      case "commands":
+        return MinaCommands;
+      case "control":
+        return ControlCenter;
+      case "settings":
+        return SettingsCenter;
+      case "pump":
+        return PumpCenter;
+      case "audit_events":
+        return AuditEvents;
+      case "brain":
+        return BrainHub;
+      case "ai_coach":
+        return AICoachChat;
+      case "ai_coach_daily":
+        return AICoach;
+      case "autopilot":
+        return Autopilot;
       case "simulator":
         return Simulator;
-      case "regime":
-        return RegimePerformance;
-      case "ml":
-        return MLExplainability;
-      case "daily":
-        return DailySummary;
-      case "coach":
-        return AICoach;
-      case "strategy":
+      case "strategy_compare":
         return StrategyComparison;
-      case "chat":
-        return AICoachChat;
-      case "decision":
-        return DecisionCenter;
-      case "audit":
-        return Audit;
-      case "events":
-        return Events;
-      case "mina_signals":
-        return MinaSignals;
-      case "mina_positions":
-        return MinaPositions;
-      case "mina_commands":
-        return MinaCommands;
+      case "daily_summary":
+        return DailySummary;
+      case "daily_education":
+        return DailyEducationPage;
       default:
-        return Overview;
+        return UnifiedOverview;
     }
   }, [page]);
 
@@ -82,31 +88,27 @@ export default function DashboardLayout() {
         }}
       >
         <Typography variant="h6" sx={{ p: 2 }}>
-          Trading Intelligence
+          Unified Control
         </Typography>
 
         <List>
-          <NavItem label="Unified Stack" onClick={() => setPage("unified")} />
-          <NavItem label="Mina Signals" onClick={() => setPage("mina_signals")} />
-          <NavItem label="Mina Positions" onClick={() => setPage("mina_positions")} />
-          <NavItem label="Mina Commands" onClick={() => setPage("mina_commands")} />
           <NavItem label="Overview" onClick={() => setPage("overview")} />
+          <NavItem label="Signals" onClick={() => setPage("signals")} />
+          <NavItem label="Trades & Positions" onClick={() => setPage("trades_positions")} />
+          <NavItem label="Performance" onClick={() => setPage("performance")} />
+          <NavItem label="Commands" onClick={() => setPage("commands")} />
+          <NavItem label="Control Center" onClick={() => setPage("control")} />
+          <NavItem label="Settings" onClick={() => setPage("settings")} />
+          <NavItem label="Pump Center" onClick={() => setPage("pump")} />
+          <NavItem label="Audit & Events" onClick={() => setPage("audit_events")} />
+          <NavItem label="Brain" onClick={() => setPage("brain")} />
+          <NavItem label="AI Coach (Daily)" onClick={() => setPage("ai_coach_daily")} />
+          <NavItem label="AI Coach" onClick={() => setPage("ai_coach")} />
+          <NavItem label="Autopilot" onClick={() => setPage("autopilot")} />
           <NavItem label="Simulator" onClick={() => setPage("simulator")} />
-          <NavItem
-            label="Regime Performance"
-            onClick={() => setPage("regime")}
-          />
-          <NavItem label="ML Explainability" onClick={() => setPage("ml")} />
-          <NavItem label="Daily Summary" onClick={() => setPage("daily")} />
-          <NavItem label="AI Coach" onClick={() => setPage("coach")} />
-          <NavItem
-            label="Strategy Comparison"
-            onClick={() => setPage("strategy")}
-          />
-          <NavItem label="AI Coach Chat" onClick={() => setPage("chat")} />
-          <NavItem label="Decision Center" onClick={() => setPage("decision")} />
-          <NavItem label="Events" onClick={() => setPage("events")} />
-          <NavItem label="Audit" onClick={() => setPage("audit")} />
+          <NavItem label="Strategy Compare" onClick={() => setPage("strategy_compare")} />
+          <NavItem label="Daily Summary" onClick={() => setPage("daily_summary")} />
+          <NavItem label="Daily Education" onClick={() => setPage("daily_education")} />
         </List>
       </Drawer>
 

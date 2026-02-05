@@ -7,6 +7,8 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from sqlalchemy import create_engine, text
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import Engine
 
 from database.models.sync_state import SyncState
@@ -27,6 +29,13 @@ def _env(*names: str, default: Optional[str] = None) -> Optional[str]:
         if v:
             return v
     return default
+
+
+def _resolve_source_schema(role: str) -> str:
+    override = _env("SOURCE_DB_SCHEMA")
+    if override:
+        return override
+    return _ROLE_TO_SCHEMA.get(role, role)
 
 
 
@@ -66,6 +75,42 @@ def _get_table_columns(engine: Engine, schema: str, table: str) -> List[str]:
     with engine.connect() as conn:
         rows = conn.execute(q, {"schema": schema, "table": table}).fetchall()
     return [r[0] for r in rows]
+
+
+def _source_counts(engine: Engine, schema: str) -> Dict[str, int]:
+    cols = set(_get_table_columns(engine, schema, "trades"))
+    if not cols:
+        return {"total_trades": 0, "closed_trades": 0, "closed_with_pnl": 0}
+
+    total_sql = text(f'SELECT COUNT(*) FROM "{schema}".trades')
+
+    if "status" in cols:
+        closed_sql = text(f"SELECT COUNT(*) FROM \"{schema}\".trades WHERE status = 'CLOSED'")
+    elif "closed_at_ms" in cols:
+        closed_sql = text(f'SELECT COUNT(*) FROM "{schema}".trades WHERE closed_at_ms IS NOT NULL')
+    else:
+        closed_sql = text("SELECT 0")
+
+    if "pnl" in cols:
+        if "status" in cols:
+            closed_pnl_sql = text(
+                f"SELECT COUNT(*) FROM \"{schema}\".trades WHERE status = 'CLOSED' AND pnl IS NOT NULL"
+            )
+        elif "closed_at_ms" in cols:
+            closed_pnl_sql = text(
+                f'SELECT COUNT(*) FROM "{schema}".trades WHERE closed_at_ms IS NOT NULL AND pnl IS NOT NULL'
+            )
+        else:
+            closed_pnl_sql = text("SELECT 0")
+    else:
+        closed_pnl_sql = text("SELECT 0")
+
+    with engine.connect() as conn:
+        total = int(conn.execute(total_sql).scalar() or 0)
+        closed = int(conn.execute(closed_sql).scalar() or 0)
+        closed_pnl = int(conn.execute(closed_pnl_sql).scalar() or 0)
+
+    return {"total_trades": total, "closed_trades": closed, "closed_with_pnl": closed_pnl}
 
 
 def _parse_dt_from_text(s: str) -> Optional[datetime]:
@@ -384,19 +429,28 @@ def sync_mina_trades(
     limit: int = 5000,
     dry_run: bool = False,
     ignore_before_ts: Optional[str] = None,
+    force: bool = False,
+    since_id: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Pull CLOSED trades from Mina Postgres schemas into Brain's feature store.
 
     - role: paper|live|pump (maps to mina_paper/mina_live/mina_pump)
     - symbol: optional symbol filter (e.g. BTCUSDT)
     """
-    schema = _ROLE_TO_SCHEMA.get(role, role)
+    schema = _resolve_source_schema(role)
 
     engine = get_source_engine()
 
     # Determine incremental cursor
     state = db.get(SyncState, role)
     after_id = int(state.last_trade_id) if state else 0
+    if force:
+        after_id = 0
+    if since_id is not None:
+        try:
+            after_id = int(since_id)
+        except Exception:
+            after_id = 0
 
     # Introspect columns to remain compatible with schema drift
     cols = _get_table_columns(engine, schema, "trades")
@@ -432,6 +486,8 @@ def sync_mina_trades(
         rows = conn.execute(text(sql), params).mappings().all()
 
     inserted = 0
+    updated = 0
+    skipped_existing = 0
     would_insert = 0
     last_id = after_id
 
@@ -439,6 +495,9 @@ def sync_mina_trades(
         row = dict(r)
         trade_id = int(row.get("id") or 0)
         if trade_id <= after_id:
+            continue
+        if not role or trade_id <= 0:
+            # Skip invalid lineage inputs.
             continue
 
         last_id = max(last_id, trade_id)
@@ -455,15 +514,57 @@ def sync_mina_trades(
             would_insert += 1
             continue
 
-        db.add(
-            TradeFeature(
-                symbol=sym,
-                timestamp_utc=ts,
-                pnl_pct=_safe_float(feats.get("pnl_pct")) or 0.0,
-                features=feats,
-            )
-        )
-        inserted += 1
+        tf = {
+            "symbol": sym,
+            "timestamp_utc": ts,
+            "pnl_pct": _safe_float(feats.get("pnl_pct")) or 0.0,
+            "features": feats,
+            "source_role": role,
+            "source_trade_id": trade_id,
+            "source_status": str(row.get("status") or "") or None,
+            "source_closed_at_ms": _safe_int(row.get("closed_at_ms")),
+            "source_pnl": _safe_float(row.get("pnl")),
+        }
+
+        # Use upsert/ignore duplicates on (source_role, source_trade_id)
+        try:
+            dialect = db.bind.dialect.name if db.bind is not None else ""
+            if dialect.startswith("postgres"):
+                stmt = pg_insert(TradeFeature).values(**tf).on_conflict_do_nothing(
+                    index_elements=["source_role", "source_trade_id"]
+                )
+                res = db.execute(stmt)
+                if res.rowcount:
+                    inserted += 1
+                else:
+                    skipped_existing += 1
+            elif dialect.startswith("sqlite"):
+                stmt = sqlite_insert(TradeFeature).values(**tf).on_conflict_do_nothing(
+                    index_elements=["source_role", "source_trade_id"]
+                )
+                res = db.execute(stmt)
+                if res.rowcount:
+                    inserted += 1
+                else:
+                    skipped_existing += 1
+            else:
+                db.add(TradeFeature(**tf))
+                inserted += 1
+        except Exception:
+            # The session may be in a failed state; rollback before retrying.
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            try:
+                db.add(TradeFeature(**tf))
+                inserted += 1
+            except Exception:
+                # If even fallback insert fails, rollback and continue.
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
 
     if dry_run:
         return {
@@ -480,13 +581,14 @@ def sync_mina_trades(
         }
 
     # Update sync cursor
-    if state is None:
-        state = SyncState(role=role, last_trade_id=last_id)
-        db.add(state)
-    else:
-        state.last_trade_id = last_id
+    if not dry_run:
+        if state is None:
+            state = SyncState(role=role, last_trade_id=last_id)
+            db.add(state)
+        else:
+            state.last_trade_id = last_id
 
-    db.commit()
+        db.commit()
 
     return {
         "ok": True,
@@ -495,6 +597,8 @@ def sync_mina_trades(
         "after_id": after_id,
         "last_id": last_id,
         "inserted": inserted,
+        "updated": updated,
+        "skipped_existing": skipped_existing,
         "dry_run": False,
         "would_insert": would_insert,
         "symbol": symbol,

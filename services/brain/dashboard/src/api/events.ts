@@ -27,7 +27,7 @@ export async function fetchEvents(params: {
   if (typeof params.since_id === "number") qs.set("since_id", String(params.since_id));
   if (params.order) qs.set("order", params.order);
 
-  const r = await fetch(`/api/events?${qs.toString()}`);
+  const r = await fetch(`/api/unified/events?${qs.toString()}`);
   const json = await r.json();
   return json;
 }
@@ -43,5 +43,5 @@ export function openEventsStream(params: {
   if (params.event_type) qs.set("event_type", params.event_type);
   if (typeof params.since_id === "number") qs.set("since_id", String(params.since_id));
   if (typeof params.interval_ms === "number") qs.set("interval_ms", String(params.interval_ms));
-  return new EventSource(`/api/events/stream?${qs.toString()}`);
+  return new EventSource(`/api/unified/events/stream?${qs.toString()}`);
 }

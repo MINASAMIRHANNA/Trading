@@ -8,7 +8,7 @@ import {
   Checkbox,
   Divider,
 } from "@mui/material";
-import Grid from "@mui/material/Grid";
+import Grid from "@mui/material/GridLegacy";
 import { runSimulation } from "../api/simulate";
 
 export default function Simulator() {

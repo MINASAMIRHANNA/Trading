@@ -4,6 +4,7 @@ from fastapi import APIRouter
 from api.routers import (
     ai_chat,
     ai_coach,
+    ai_coach_chat,
     daily_education,
     daily_summary,
     decision,
@@ -17,6 +18,7 @@ from api.routers import (
     strategy_compare,
     strategy_ranking,
     sync,
+    admin,
 )
 
 api_router = APIRouter()
@@ -35,5 +37,7 @@ api_router.include_router(events.router, prefix="/events", tags=["events"])
 api_router.include_router(daily_summary.router, prefix="/daily-summary", tags=["daily-summary"])
 api_router.include_router(daily_education.router, prefix="/daily-education", tags=["daily-education"])
 api_router.include_router(ai_coach.router, prefix="/ai-coach", tags=["ai-coach"])
+api_router.include_router(ai_coach_chat.router, prefix="/ai_coach", tags=["ai-coach"])
 api_router.include_router(ai_chat.router, prefix="/ai-chat", tags=["ai-chat"])
 api_router.include_router(demo.router, prefix="/demo", tags=["demo"])
+api_router.include_router(admin.router, prefix="/admin", tags=["admin"])
