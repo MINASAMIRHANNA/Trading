@@ -1394,6 +1394,10 @@ async def api_unified_overview():
 async def api_unified_autopilot_get():
     return _autopilot_state()
 
+@app.get("/api/autopilot")
+async def api_autopilot_get_alias():
+    return _autopilot_state()
+
 
 @app.post("/api/unified/autopilot")
 async def api_unified_autopilot_set_global(request: Request):
@@ -1415,6 +1419,10 @@ async def api_unified_autopilot_set_global(request: Request):
         ok=True,
     )
     return {**resp, "ok": True, "trace_id": trace_id, "audit_id": audit_id}
+
+@app.post("/api/autopilot")
+async def api_autopilot_set_global_alias(request: Request):
+    return await api_unified_autopilot_set_global(request)
 
 
 @app.post("/api/unified/autopilot/{role}")
@@ -1438,6 +1446,72 @@ async def api_unified_autopilot_set_role(role: Role, request: Request):
     )
     return {**resp, "ok": True, "trace_id": trace_id, "audit_id": audit_id}
 
+@app.post("/api/autopilot/{role}")
+async def api_autopilot_set_role_alias(role: Role, request: Request):
+    return await api_unified_autopilot_set_role(role, request)
+
+@app.post("/api/autopilot/shadow_decision")
+async def api_autopilot_shadow_decision(request: Request):
+    """Record a shadow decision from the autopilot worker (audit + shared_events)."""
+    try:
+        body = await request.json()
+        if not isinstance(body, dict):
+            raise HTTPException(status_code=400, detail="Body must be an object")
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+
+    role = body.get("role")
+    signal_id = body.get("signal_id")
+    trace_id = body.get("trace_id") or _trace_id_from_request(request)
+    payload = {
+        "role": role,
+        "signal_id": signal_id,
+        "would_action": body.get("would_action"),
+        "reason": body.get("reason"),
+        "meta": body.get("meta") or {},
+    }
+
+    audit_id = await _audit_write(
+        request=request,
+        action="AUTOPILOT_SHADOW_DECISION",
+        role=str(role) if role else None,
+        target_id=str(signal_id) if signal_id is not None else None,
+        trace_id=trace_id,
+        request_json=payload,
+        response_json={"ok": True},
+        ok=True,
+    )
+    return {"ok": True, "trace_id": trace_id, "audit_id": audit_id}
+
+@app.post("/api/autopilot/heartbeat")
+async def api_autopilot_heartbeat(request: Request):
+    """Record a worker heartbeat (audit + shared_events)."""
+    try:
+        body = await request.json()
+        if not isinstance(body, dict):
+            body = {}
+    except Exception:
+        body = {}
+
+    trace_id = body.get("trace_id") or _trace_id_from_request(request)
+    payload = {
+        "last_cycle_utc": body.get("last_cycle_utc"),
+        "ok": bool(body.get("ok", True)),
+        "last_error": body.get("last_error"),
+    }
+    audit_id = await _audit_write(
+        request=request,
+        action="AUTOPILOT_WORKER_HEARTBEAT",
+        role=None,
+        target_id="worker",
+        trace_id=trace_id,
+        request_json=payload,
+        response_json={"ok": True},
+        ok=bool(payload.get("ok", True)),
+    )
+    return {"ok": True, "trace_id": trace_id, "audit_id": audit_id}
 
 @app.post("/api/unified/sync/run")
 async def api_unified_sync_run(request: Request):
