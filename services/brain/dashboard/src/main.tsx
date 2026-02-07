@@ -3,6 +3,7 @@ import ReactDOM from "react-dom/client";
 import { ThemeProvider, CssBaseline } from "@mui/material";
 import { darkTheme } from "./theme";
 import App from "./App";
+import "./styles/mina.css";
 
 ReactDOM.createRoot(
   document.getElementById("root") as HTMLElement

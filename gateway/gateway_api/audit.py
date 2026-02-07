@@ -29,8 +29,21 @@ def _normalize_dsn(dsn: str) -> str:
 
 
 def get_dsn() -> str:
-    raw = os.getenv("TRADING_PG_DSN") or os.getenv("DATABASE_URL") or DEFAULT_DSN
-    return _normalize_dsn(raw)
+    raw = (os.getenv("TRADING_PG_DSN") or "").strip()
+    if not raw:
+        raise RuntimeError(
+            "TRADING_PG_DSN is required for gateway runtime. "
+            "Refusing to start with implicit/fallback DSN."
+        )
+    dsn = _normalize_dsn(raw)
+    expected = _normalize_dsn(
+        os.getenv("EXPECTED_TRADING_PG_DSN", DEFAULT_DSN)
+    )
+    if dsn != expected:
+        raise RuntimeError(
+            f"TRADING_PG_DSN mismatch. expected={expected!r} got={dsn!r}"
+        )
+    return dsn
 
 
 def ensure_audit_schema_and_table(dsn: str) -> None:

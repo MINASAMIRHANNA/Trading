@@ -1,14 +1,24 @@
-# Ports map (Phase 0 baseline)
+# Ports and Runtime Entry Points
 
-## Mina_Bot
-- Dashboard paper: 8000
-- Dashboard live:  8001
-- Dashboard pump:  8002
+## Core Services
+- `Gateway API`: `http://localhost:8200`
+- `Brain API`: `http://localhost:8100`
+- `Unified React Dashboard (dev)`: `http://localhost:5173`
+- `Postgres`: `localhost:5432` (`trading` DB)
 
-## Brain
-- API: 8100 (local multi-service)
-- Vite: 5173 (may become 5174 if busy)
+## Mina Dashboards (legacy, kept intact)
+- `paper`: `http://localhost:8000`
+- `live`: `http://localhost:8001`
+- `pump`: `http://localhost:8002`
 
-## Gateway
-- (reserved) 8200 for gateway API later
+## Database Schemas
+- `mina_paper`
+- `mina_live`
+- `mina_pump`
+- `brain`
+- `gateway`
 
+## Notes
+- Unified React UI talks to Gateway only via `/api/*`.
+- Gateway proxies to Brain and Mina dashboards.
+- No SQLite fallback is used for runtime services.

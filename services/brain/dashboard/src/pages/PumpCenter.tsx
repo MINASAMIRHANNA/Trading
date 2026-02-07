@@ -27,11 +27,14 @@ import {
   rejectPumpCandidate,
   setPumpLabel,
 } from "../api/pump";
+import KeyValueGrid from "../components/KeyValueGrid";
+import { requestLiveGuard } from "../utils/liveGuard";
 
 type Candidate = Record<string, any>;
 
 const STATUSES = ["PENDING", "WATCH", "APPROVED", "REJECTED", "EXECUTED"];
 const SIDES = ["LONG", "SHORT"];
+const TARGET_ROLES = ["paper", "live"] as const;
 
 export default function PumpCenter() {
   const [status, setStatus] = useState<any>(null);
@@ -47,6 +50,7 @@ export default function PumpCenter() {
   const [noteById, setNoteById] = useState<Record<number, string>>({});
   const [labelById, setLabelById] = useState<Record<number, string>>({});
   const [sideById, setSideById] = useState<Record<number, string>>({});
+  const [targetRoleById, setTargetRoleById] = useState<Record<number, "paper" | "live">>({});
 
   const [snack, setSnack] = useState<{ open: boolean; msg: string; severity: "success" | "error" }>({
     open: false,
@@ -104,10 +108,34 @@ export default function PumpCenter() {
   const action = async (fn: () => Promise<any>, successMsg: string) => {
     try {
       const res = await fn();
-      setSnack({ open: true, msg: successMsg || JSON.stringify(res), severity: "success" });
+      const trace = String(res?.trace_id || "").trim();
+      const msg = successMsg || (trace ? `Done. trace_id=${trace}` : "Done.");
+      setSnack({ open: true, msg, severity: "success" });
       await load();
     } catch (e: any) {
       setSnack({ open: true, msg: String(e?.message || e || "Action failed"), severity: "error" });
+    }
+  };
+
+  const runPromoteCandidate = async (id: number, side: string, targetRole: "paper" | "live", note: string) => {
+    let guard: Record<string, any> = {};
+    if (targetRole === "live") {
+      const payload = await requestLiveGuard(`Promote pump candidate #${id} to LIVE`);
+      if (!payload) return;
+      guard = payload;
+    }
+    try {
+      const out = await promotePumpCandidate({ id, side, note, target_role: targetRole, ...(guard || {}) });
+      const trace = String(out?.trace_id || "").trim();
+      const traceText = trace ? ` | trace_id=${trace}` : "";
+      setSnack({
+        open: true,
+        msg: `Promoted to ${targetRole.toUpperCase()}${traceText}`,
+        severity: "success",
+      });
+      await load();
+    } catch (e: any) {
+      setSnack({ open: true, msg: String(e?.message || e || "Promotion failed"), severity: "error" });
     }
   };
 
@@ -125,6 +153,9 @@ export default function PumpCenter() {
       <Typography variant="body2" sx={{ opacity: 0.8, mb: 2 }}>
         Pump-only controls via Gateway proxy (/api/mina/pump/*). No direct execution.
       </Typography>
+      <Alert severity="info" sx={{ mb: 2 }}>
+        Pump Hunter is signal-only. Promote candidates to <b>paper</b> or <b>live</b> for execution via role command queues.
+      </Alert>
 
       <Stack direction="row" spacing={2} alignItems="center" sx={{ mb: 2 }} flexWrap="wrap">
         <Button variant="outlined" onClick={() => void load()} disabled={loading}>
@@ -166,11 +197,10 @@ export default function PumpCenter() {
         <Typography variant="subtitle1">Status</Typography>
         <Stack direction="row" spacing={2} sx={{ mt: 1, mb: 1 }} flexWrap="wrap">
           <Chip label={`Pump OK: ${String(status?.state?.last_heartbeat_ms ? "yes" : "no")}`} />
-          <Chip label={`Counts: ${JSON.stringify(status?.counts || {})}`} />
+          <Chip label={`Candidates: ${status?.counts?.candidates ?? "—"}`} />
+          <Chip label={`Approved: ${status?.counts?.approved ?? "—"}`} />
         </Stack>
-        <Box component="pre" sx={{ p: 2, background: "#0d1117", color: "#e6edf3", borderRadius: 1, fontSize: 12 }}>
-          {JSON.stringify(status || {}, null, 2)}
-        </Box>
+        <KeyValueGrid data={status} />
       </Paper>
 
       <Paper sx={{ p: 2, mb: 2 }}>
@@ -194,6 +224,7 @@ export default function PumpCenter() {
               const note = noteById[id] ?? "";
               const label = labelById[id] ?? "PUMP";
               const side = sideById[id] ?? "LONG";
+              const targetRole = targetRoleById[id] ?? "paper";
               const ts = candidateTs(c);
               return (
                 <TableRow key={id || `${c.symbol}-${ts}`}>
@@ -243,9 +274,25 @@ export default function PumpCenter() {
                           </MenuItem>
                         ))}
                       </TextField>
+                      <TextField
+                        select
+                        size="small"
+                        label="Target"
+                        value={targetRole}
+                        onChange={(e) =>
+                          setTargetRoleById((p) => ({ ...p, [id]: (e.target.value as "paper" | "live") || "paper" }))
+                        }
+                        sx={{ width: 110 }}
+                      >
+                        {TARGET_ROLES.map((r) => (
+                          <MenuItem key={r} value={r}>
+                            {r.toUpperCase()}
+                          </MenuItem>
+                        ))}
+                      </TextField>
                       <Button
                         size="small"
-                        onClick={() => action(() => promotePumpCandidate({ id, side, note }), "Promoted")}
+                        onClick={() => void runPromoteCandidate(id, side, targetRole, note)}
                       >
                         Promote
                       </Button>
@@ -285,9 +332,7 @@ export default function PumpCenter() {
 
       <Paper sx={{ p: 2, mb: 2 }}>
         <Typography variant="subtitle1">Stats</Typography>
-        <Box component="pre" sx={{ p: 2, background: "#0d1117", color: "#e6edf3", borderRadius: 1, fontSize: 12 }}>
-          {JSON.stringify(stats || {}, null, 2)}
-        </Box>
+        <KeyValueGrid data={stats} />
       </Paper>
 
       <Paper sx={{ p: 2 }}>

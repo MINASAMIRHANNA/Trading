@@ -22,8 +22,16 @@ export async function rejectPumpCandidate(payload: { id: number; note?: string }
   return data;
 }
 
-export async function promotePumpCandidate(payload: { id: number; side: string; note?: string }): Promise<any> {
-  const { data } = await api.post("/mina/pump/pump/candidates/promote", payload);
+export async function promotePumpCandidate(payload: {
+  id: number;
+  side: string;
+  target_role: "paper" | "live";
+  note?: string;
+  live_confirm?: boolean;
+  live_confirm_ack?: boolean;
+  live_pin?: string;
+}): Promise<any> {
+  const { data } = await api.post("/pump/candidates/promote", payload);
   return data;
 }
 

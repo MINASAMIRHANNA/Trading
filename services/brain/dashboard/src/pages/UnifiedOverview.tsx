@@ -1,133 +1,102 @@
-import { useEffect, useState } from "react";
-import {
-  Box,
-  Divider,
-  Paper,
-  Typography,
-  CircularProgress,
-  Button,
-} from "@mui/material";
-import Grid from "@mui/material/GridLegacy";
+import { useEffect, useMemo, useState } from "react";
 import { fetchUnifiedOverview, fetchUnifiedSystemHealth, type UnifiedRole } from "../api/unified";
-
-type RoleHealth = {
-  role: UnifiedRole;
-  data: any;
-};
+import { DataTable, KpiCard, Panel, SectionHeader, StatusPill, formatNum } from "../components/mina";
 
 export default function UnifiedOverview() {
-  const [loading, setLoading] = useState(true);
-  const [err, setErr] = useState<string | null>(null);
   const [overview, setOverview] = useState<any>(null);
-  const [health, setHealth] = useState<RoleHealth[]>([]);
+  const [healthRows, setHealthRows] = useState<any[]>([]);
+  const [message, setMessage] = useState("");
+  const [lastUpdated, setLastUpdated] = useState("");
 
   const load = async () => {
-    setLoading(true);
-    setErr(null);
     try {
       const ov = await fetchUnifiedOverview();
-      setOverview(ov);
       const roles: UnifiedRole[] = ["paper", "live", "pump"];
-      const healthRows = await Promise.all(
-        roles.map(async (role) => ({ role, data: await fetchUnifiedSystemHealth(role) }))
+      const health = await Promise.all(
+        roles.map(async (role) => ({ role, ...(await fetchUnifiedSystemHealth(role)) })),
       );
-      setHealth(healthRows);
-    } catch (e: any) {
-      setErr(e?.message || "Failed to load overview");
-    } finally {
-      setLoading(false);
+      setOverview(ov || {});
+      setHealthRows(health || []);
+      setLastUpdated(new Date().toISOString());
+      setMessage("");
+    } catch (err: any) {
+      setMessage(err?.message || "Failed to load unified overview.");
     }
   };
 
   useEffect(() => {
     void load();
+    const id = setInterval(() => void load(), 7000);
+    return () => clearInterval(id);
   }, []);
 
-  if (loading) {
-    return (
-      <Box sx={{ p: 3, display: "flex", gap: 2, alignItems: "center" }}>
-        <CircularProgress size={20} />
-        <Typography>Loading overview…</Typography>
-      </Box>
-    );
-  }
-
-  if (err) {
-    return (
-      <Box sx={{ p: 3 }}>
-        <Typography color="error">{err}</Typography>
-        <Button onClick={() => void load()} sx={{ mt: 2 }} variant="contained">
-          Retry
-        </Button>
-      </Box>
-    );
-  }
+  const roleStats = useMemo(() => {
+    const d = overview?.dashboards || {};
+    return (["paper", "live", "pump"] as UnifiedRole[]).map((r) => {
+      const s = d?.[r]?.stats || {};
+      const signals = d?.[r]?.signals_preview || [];
+      return {
+        role: r,
+        trades: s?.trades ?? 0,
+        win_rate: s?.win_rate ?? 0,
+        pnl: s?.pnl ?? 0,
+        signals: Array.isArray(signals) ? signals.length : 0,
+      };
+    });
+  }, [overview]);
 
   const brain = overview?.brain || {};
-  const dashboards = overview?.dashboards || {};
 
   return (
-    <Box sx={{ p: 3 }}>
-      <Typography variant="h4" sx={{ mb: 1 }}>
-        Unified Overview
-      </Typography>
-      <Typography sx={{ opacity: 0.8, mb: 2 }}>
-        Gateway-backed health + performance snapshot across paper/live/pump.
-      </Typography>
+    <div>
+      <SectionHeader
+        title="Unified Overview"
+        subtitle="Gateway-backed snapshot for paper/live/pump and brain analytics."
+        right={message ? <span className="muted">{message}</span> : <span className="muted">Last updated: {lastUpdated || "—"}</span>}
+      />
 
-      <Grid container spacing={2}>
-        <Grid item xs={12} md={4}>
-          <Paper sx={{ p: 2 }}>
-            <Typography variant="subtitle2" sx={{ opacity: 0.7 }}>
-              Brain (features)
-            </Typography>
-            <Typography variant="h5">{brain.trades ?? 0} trades</Typography>
-            <Typography variant="body2">win_rate: {brain.win_rate ?? "-"}</Typography>
-            <Typography variant="body2">expectancy: {brain.expectancy ?? "-"}</Typography>
-          </Paper>
-        </Grid>
+      <Panel title="Top Summary Cards">
+        <div className="kpi-grid">
+          <KpiCard label="Brain Trades" value={formatNum(brain?.trades ?? 0, 0)} />
+          <KpiCard label="Brain Win Rate" value={`${formatNum(brain?.win_rate ?? 0)}%`} tone={Number(brain?.win_rate || 0) >= 50 ? "good" : "warn"} />
+          <KpiCard label="Brain Expectancy" value={formatNum(brain?.expectancy ?? 0, 6)} tone={Number(brain?.expectancy || 0) >= 0 ? "good" : "bad"} />
+          <KpiCard label="Roles" value="paper / live / pump" />
+        </div>
+      </Panel>
 
-        {(["paper", "live", "pump"] as UnifiedRole[]).map((role) => {
-          const stats = dashboards?.[role]?.stats || {};
-          const signals = dashboards?.[role]?.signals_preview || [];
-          return (
-            <Grid item xs={12} md={4} key={role}>
-              <Paper sx={{ p: 2 }}>
-                <Typography variant="subtitle2" sx={{ opacity: 0.7 }}>
-                  {role} dashboard
-                </Typography>
-                <Typography variant="h5">{stats.trades ?? 0} trades</Typography>
-                <Typography variant="body2">win_rate: {stats.win_rate ?? "-"}</Typography>
-                <Typography variant="body2">pnl: {stats.pnl ?? "-"}</Typography>
-                <Typography variant="body2" sx={{ mt: 1 }}>
-                  signals preview: {Array.isArray(signals) ? signals.length : 0}
-                </Typography>
-              </Paper>
-            </Grid>
-          );
-        })}
-      </Grid>
+      <div className="grid-2">
+        <Panel title="Role Stats">
+          <DataTable
+            rows={roleStats}
+            emptyText="No role stats yet."
+            columns={[
+              { key: "role", title: "Role", render: (row: any) => row.role },
+              { key: "trades", title: "Trades", render: (row: any) => formatNum(row.trades, 0) },
+              { key: "win_rate", title: "Win Rate", render: (row: any) => `${formatNum(row.win_rate)}%` },
+              { key: "pnl", title: "PnL", render: (row: any) => formatNum(row.pnl) },
+              { key: "signals", title: "Signals", render: (row: any) => formatNum(row.signals, 0) },
+            ]}
+          />
+        </Panel>
 
-      <Divider sx={{ my: 3 }} />
-
-      <Typography variant="h6" sx={{ mb: 1 }}>
-        System Health
-      </Typography>
-      <Grid container spacing={2}>
-        {health.map(({ role, data }) => (
-          <Grid item xs={12} md={4} key={role}>
-            <Paper sx={{ p: 2 }}>
-              <Typography variant="subtitle2" sx={{ opacity: 0.7 }}>
-                {role}
-              </Typography>
-              <Typography variant="body2">online: {String(data?.online ?? "-")}</Typography>
-              <Typography variant="body2">latency: {data?.latency ?? "-"} ms</Typography>
-              <Typography variant="body2">last_seen: {data?.last_seen_seconds ?? "-"}s</Typography>
-              <Typography variant="body2">errors: {data?.error_count ?? "-"}</Typography>
-            </Paper>
-          </Grid>
-        ))}
-      </Grid>
-    </Box>
+        <Panel title="System Health">
+          <DataTable
+            rows={healthRows}
+            emptyText="No system health rows."
+            columns={[
+              { key: "role", title: "Role", render: (row: any) => row.role },
+              {
+                key: "online",
+                title: "Online",
+                render: (row: any) => <StatusPill text={row.online ? "YES" : "NO"} tone={row.online ? "good" : "bad"} />,
+              },
+              { key: "latency", title: "Latency ms", render: (row: any) => formatNum(row.latency, 0) },
+              { key: "last_seen_seconds", title: "Last Seen (s)", render: (row: any) => formatNum(row.last_seen_seconds, 0) },
+              { key: "error_count", title: "Errors", render: (row: any) => formatNum(row.error_count, 0) },
+            ]}
+          />
+        </Panel>
+      </div>
+    </div>
   );
 }

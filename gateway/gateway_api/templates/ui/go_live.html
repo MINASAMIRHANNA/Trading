@@ -1,0 +1,51 @@
+{% extends "ui/base.html" %}
+{% block content %}
+  <div class="panel" style="margin-bottom: 16px;">
+    <div class="panel-head"><i class="fa-solid fa-rocket"></i> Ready for Live Checklist</div>
+    <ol style="line-height: 1.6; font-size: 0.9rem;">
+      <li>Run testnet/paper for 24h with kill switch enabled once.</li>
+      <li>Verify max_concurrent_trades, max_trade_usd, leverage limits per role.</li>
+      <li>Confirm binance keys permissions and test connectivity.</li>
+      <li>Check brain sync_state freshness for each schema.</li>
+      <li>Ensure command queue has no stuck commands.</li>
+      <li>Run E2E paper trade smoke (signals → open → close → brain sync).</li>
+      <li>Turn LIVE mode only after monitoring stable for 24h.</li>
+    </ol>
+  </div>
+
+  <div class="panel">
+    <div class="panel-head"><i class="fa-solid fa-check"></i> Quick Commands</div>
+    <div class="inline-actions">
+      <button class="btn btn-secondary small-btn" onclick="window.location='/ui/doctor'">Open Doctor</button>
+      <button class="btn btn-secondary small-btn" onclick="window.location='/ui/ops'">Open Ops Live</button>
+      <button class="btn btn-secondary small-btn" onclick="window.location='/ui/portfolio'">Open Portfolio</button>
+      <button class="btn btn-secondary small-btn" onclick="runQuickChecks()">Run Quick Checks</button>
+    </div>
+    <div class="table-wrap" style="margin-top:10px;">
+      <table class="data-table">
+        <thead><tr><th>Check</th><th>Severity</th><th>Details</th></tr></thead>
+        <tbody id="golive-checks"></tbody>
+      </table>
+    </div>
+  </div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+async function runQuickChecks() {
+  try {
+    const data = await fetchJson('/api/doctor/run', { method: 'POST' });
+    const body = document.getElementById('golive-checks');
+    body.innerHTML = '';
+    (data.checks || []).forEach((c) => {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `<td>${c.name}</td><td>${c.severity}</td><td>${c.details || ''}</td>`;
+      body.appendChild(tr);
+    });
+    showToast('Checks complete');
+  } catch (e) {
+    showToast(e.message || 'Checks failed', false);
+  }
+}
+</script>
+{% endblock %}

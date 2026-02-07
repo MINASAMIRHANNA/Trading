@@ -35,6 +35,8 @@
     .small{ font-size:0.82rem; color:var(--muted); }
     pre{ background:#0d1117; border:1px solid var(--border); border-radius:10px; padding:10px; overflow:auto; font-size:0.82rem; }
   </style>
+    <script>window.DASHBOARD_READ_ONLY = {{ "true" if read_only else "false" }};</script>
+    <script defer src="/static/readonly.js"></script>
 </head>
 <body>
   <div class="container">

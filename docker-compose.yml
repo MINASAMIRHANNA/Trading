@@ -25,16 +25,23 @@ services:
     environment:
       MINA_DB_BACKEND: postgres
       TRADING_PG_DSN: postgresql://trading:trading@postgres:5432/trading
+      TRADING_PG_SCHEMA: mina_paper
       # Phase 4: mirror runtime events/logs/settings into shared_* tables (public schema)
       # so Gateway/Brain can consume a unified stream. Set to 0 to disable.
       TRADING_PG_MIRROR: "1"
       BOT_ROLE: paper
       BOT_ID: paper-1
       BOT_VERSION: 1.0.0
+      READ_ONLY: "1"
       DASHBOARD_API_KEY: trading-dev
     depends_on:
       postgres:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=5).read()"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
     volumes:
       - ./services/mina_bot:/app
     working_dir: /app
@@ -49,14 +56,21 @@ services:
     environment:
       MINA_DB_BACKEND: postgres
       TRADING_PG_DSN: postgresql://trading:trading@postgres:5432/trading
+      TRADING_PG_SCHEMA: mina_live
       TRADING_PG_MIRROR: "1"
       BOT_ROLE: live
       BOT_ID: live-1
       BOT_VERSION: 1.0.0
+      READ_ONLY: "1"
       DASHBOARD_API_KEY: trading-dev
     depends_on:
       postgres:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/health', timeout=5).read()"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
     volumes:
       - ./services/mina_bot:/app
     working_dir: /app
@@ -71,14 +85,21 @@ services:
     environment:
       MINA_DB_BACKEND: postgres
       TRADING_PG_DSN: postgresql://trading:trading@postgres:5432/trading
+      TRADING_PG_SCHEMA: mina_pump
       TRADING_PG_MIRROR: "1"
       BOT_ROLE: pump
       BOT_ID: pump-1
       BOT_VERSION: 1.0.0
+      READ_ONLY: "1"
       DASHBOARD_API_KEY: trading-dev
     depends_on:
       postgres:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8002/health', timeout=5).read()"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
     volumes:
       - ./services/mina_bot:/app
     working_dir: /app
@@ -102,6 +123,14 @@ services:
     working_dir: /app
     ports:
       - "8100:8100"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8100/health', timeout=5).read()"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
 
 
   brain_sync_worker:
@@ -118,7 +147,6 @@ services:
       - STARTUP_SLEEP_SEC=10
 
   brain_ui:
-    profiles: ["dev"]
     build:
       context: ./services/brain/dashboard
       dockerfile: Dockerfile
@@ -162,6 +190,19 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      brain_api:
+        condition: service_healthy
+      mina_dashboard_paper:
+        condition: service_healthy
+      mina_dashboard_live:
+        condition: service_healthy
+      mina_dashboard_pump:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8200/health', timeout=5).read()"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
 
   gateway_autopilot_worker:
     build:
@@ -174,6 +215,18 @@ services:
       - AUTOPILOT_TICK_SEC=10
       - AUTOPILOT_MAX_SIGNALS_PER_ROLE=50
       - AUTOPILOT_ROLES=paper,live,pump
+    depends_on:
+      - gateway_api
+
+  gateway_alerts_worker:
+    build:
+      context: .
+      dockerfile: gateway/Dockerfile
+    command: python -m gateway_api.alerts_worker
+    environment:
+      - TRADING_PG_DSN=postgresql://trading:trading@postgres:5432/trading
+      - TRADING_MASTER_KEY=${TRADING_MASTER_KEY:-}
+      - ALERTS_TICK_SEC=5
     depends_on:
       - gateway_api
 volumes:

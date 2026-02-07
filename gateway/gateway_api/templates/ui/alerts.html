@@ -1,0 +1,109 @@
+{% extends "ui/base.html" %}
+{% block content %}
+  <div class="panel" style="margin-bottom: 16px;">
+    <div class="panel-head"><i class="fa-solid fa-bell"></i> Telegram Alerts</div>
+    <div class="form-row">
+      <div class="input-wrap"><label>Bot Token</label><input id="tg-token" placeholder="token" /></div>
+      <div class="input-wrap"><label>Chat ID</label><input id="tg-chat" placeholder="chat_id" /></div>
+    </div>
+    <div class="form-row">
+      <div class="input-wrap"><label>Alert Signals</label><select id="tg-signal" class="dark-input"><option value="true">TRUE</option><option value="false">FALSE</option></select></div>
+      <div class="input-wrap"><label>Alert Errors</label><select id="tg-errors" class="dark-input"><option value="true">TRUE</option><option value="false">FALSE</option></select></div>
+      <div class="input-wrap"><label>Alert Kill Switch</label><select id="tg-kill" class="dark-input"><option value="true">TRUE</option><option value="false">FALSE</option></select></div>
+    </div>
+    <div class="inline-actions" style="margin-top: 10px;">
+      <button class="btn btn-secondary small-btn" onclick="saveTelegram()">Save</button>
+      <button class="btn btn-blue small-btn" onclick="testTelegram()">Send Test</button>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-head"><i class="fa-solid fa-filter"></i> Alert Rules</div>
+    <div class="form-row">
+      <div class="input-wrap"><label>Role Filter</label><input id="rule-role" placeholder="paper/live/pump" /></div>
+      <div class="input-wrap"><label>Event Types (comma)</label><input id="rule-types" placeholder="ERROR,SIGNAL_PUBLISH" /></div>
+    </div>
+    <div class="inline-actions" style="margin-top: 10px;">
+      <button class="btn btn-secondary small-btn" onclick="saveRules()">Save Rules</button>
+    </div>
+  </div>
+
+  <div class="panel" style="margin-top:16px;">
+    <div class="panel-head"><i class="fa-solid fa-clock"></i> Recent Deliveries</div>
+    <div class="table-wrap">
+      <table class="data-table">
+        <thead><tr><th>Channel</th><th>Status</th><th>Error</th><th>Time</th></tr></thead>
+        <tbody id="alerts-history"></tbody>
+      </table>
+    </div>
+  </div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+async function loadAlerts() {
+  try {
+    const settings = await fetchJson('/api/alerts/telegram/settings');
+    document.getElementById('tg-token').value = settings.TELEGRAM_BOT_TOKEN || '';
+    document.getElementById('tg-chat').value = settings.TELEGRAM_CHAT_ID || '';
+    document.getElementById('tg-signal').value = String(settings.alert_signals ?? true);
+    document.getElementById('tg-errors').value = String(settings.alert_errors ?? true);
+    document.getElementById('tg-kill').value = String(settings.alert_kill_switch ?? true);
+
+    const rules = await fetchJson('/api/alerts/rules');
+    const filters = rules.filters || {};
+    document.getElementById('rule-role').value = filters.role || '';
+    document.getElementById('rule-types').value = (filters.event_types || []).join(',');
+
+    const hist = await fetchJson('/api/alerts/history?limit=20');
+    const body = document.getElementById('alerts-history');
+    body.innerHTML = '';
+    (hist.items || hist || []).forEach((row) => {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `<td>${row.channel || '-'}</td><td>${row.status || '-'}</td><td>${row.error || '-'}</td><td>${row.created_at || '-'}</td>`;
+      body.appendChild(tr);
+    });
+  } catch (e) {
+    showToast(e.message || 'Alerts load failed', false);
+  }
+}
+
+async function saveTelegram() {
+  const payload = {
+    TELEGRAM_BOT_TOKEN: document.getElementById('tg-token').value,
+    TELEGRAM_CHAT_ID: document.getElementById('tg-chat').value,
+    alert_signals: document.getElementById('tg-signal').value === 'true',
+    alert_errors: document.getElementById('tg-errors').value === 'true',
+    alert_kill_switch: document.getElementById('tg-kill').value === 'true',
+  };
+  try {
+    await fetchJson('/api/alerts/telegram/settings', { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+    showToast('Telegram settings saved');
+  } catch (e) {
+    showToast(e.message || 'Save failed', false);
+  }
+}
+
+async function testTelegram() {
+  try {
+    await fetchJson('/api/alerts/telegram/test', { method: 'POST' });
+    showToast('Test sent');
+  } catch (e) {
+    showToast(e.message || 'Test failed', false);
+  }
+}
+
+async function saveRules() {
+  const role = document.getElementById('rule-role').value;
+  const types = (document.getElementById('rule-types').value || '').split(',').map(s => s.trim()).filter(Boolean);
+  try {
+    await fetchJson('/api/alerts/rules', { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ filters: { role, event_types: types } }) });
+    showToast('Rules saved');
+  } catch (e) {
+    showToast(e.message || 'Rules save failed', false);
+  }
+}
+
+loadAlerts();
+</script>
+{% endblock %}

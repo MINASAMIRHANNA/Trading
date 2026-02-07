@@ -135,7 +135,7 @@ def _post_shadow_decision(client: httpx.Client, role: str, signal_id: Any, would
         "meta": meta,
         "trace_id": trace_id,
     }
-    client.post(f"{GATEWAY_URL}/api/autopilot/shadow_decision", json=payload, headers=_headers(trace_id))
+    client.post(f"{GATEWAY_URL}/api/autopilot/worker/shadow_decision", json=payload, headers=_headers(trace_id))
 
 
 def _post_heartbeat(client: httpx.Client, ok: bool, last_error: str | None) -> None:
@@ -146,7 +146,7 @@ def _post_heartbeat(client: httpx.Client, ok: bool, last_error: str | None) -> N
         "last_error": last_error,
         "trace_id": trace_id,
     }
-    client.post(f"{GATEWAY_URL}/api/autopilot/heartbeat", json=payload, headers=_headers(trace_id))
+    client.post(f"{GATEWAY_URL}/api/autopilot/worker/heartbeat", json=payload, headers=_headers(trace_id))
 
 
 def _require_dashboard_approval(settings: Dict[str, Any]) -> bool:
@@ -178,6 +178,8 @@ def _run_cycle(client: httpx.Client) -> None:
 
         for sig in pending:
             signal_id = sig.get("id")
+            if signal_id is None:
+                continue
             action, reason, meta = _decide_action(settings, sig)
             shadow_only = effective == "SHADOW" or _require_dashboard_approval(settings)
 
@@ -205,16 +207,13 @@ def _run_cycle(client: httpx.Client) -> None:
 
 def main() -> None:
     if not GATEWAY_API_KEY:
-        print("⚠️  GATEWAY_API_KEY is not set. Autopilot worker will idle.")
+        print("⚠️  GATEWAY_API_KEY is not set. Autopilot worker will run without auth.")
     client = httpx.Client(timeout=20.0)
 
     while True:
         last_error = None
         ok = True
         try:
-            if not GATEWAY_API_KEY:
-                time.sleep(max(2, AUTOPILOT_TICK_SEC))
-                continue
             _run_cycle(client)
         except Exception as e:
             ok = False

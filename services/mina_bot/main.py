@@ -46,6 +46,7 @@ from realtime_futures_ws import start_futures_sockets
 from realtime_ws import start_kline_socket
 from data_manager import DataManager
 from database import DatabaseManager
+from service_registry import register_service
 from pump_detector import detect_pre_pump
 from trading_executor import place_market_order, close_open_position, move_stop_loss, place_hard_tp, set_leverage
 from risk_monitor import RiskSupervisor
@@ -68,6 +69,15 @@ except Exception:
     _mode_final = str(_mode_db or "TEST").strip().upper()
 try:
     db.sync_legacy_mode_keys(_mode_final, source="main.startup")
+except Exception:
+    pass
+try:
+    register_service(
+        "mina_bot",
+        role=str(os.getenv("BOT_ROLE") or "").strip().lower() or None,
+        schema_name=getattr(db, "pg_schema", None),
+        meta={"entrypoint": "services/mina_bot/main.py"},
+    )
 except Exception:
     pass
 
@@ -1810,6 +1820,10 @@ async def command_monitor_task():
                 'MANUAL_TRADE',
                 'EXECUTE_SIGNAL',
                 'CHECK_SIGNAL',
+                'RESTART_BOT',
+                'BOT_RESTART',
+                'BOT_STOP',
+                'BOT_START',
             )
 
             # Prefer DB-native filtered claiming (Sprint 8+). Fallback to local helper for older DB code.
@@ -1822,6 +1836,7 @@ async def command_monitor_task():
                     limit=50,
                     worker='main',
                 )
+            restart_requested = False
             for cid, cmd, params_str in commands:
                 cmd_ok = True
                 cmd_err = ''
@@ -2254,7 +2269,21 @@ async def command_monitor_task():
                             strategy = select_strategy(df, price, gate)
                             log(f"📊 {sym} Report: Gate={gate} | Strategy={strategy}", "SYSTEM")
                             
-                        asyncio.create_task(async_analyze_wrapper(sym, "5m", None, m_type))
+                            asyncio.create_task(async_analyze_wrapper(sym, "5m", None, m_type))
+
+                    elif cmd in ("RESTART_BOT", "BOT_RESTART"):
+                        restart_requested = True
+                        cmd_ok = True
+
+                    elif cmd == "BOT_STOP":
+                        log("🛑 STOP command received. Exiting now...", "SYSTEM")
+                        restart_requested = True
+                        cmd_ok = True
+
+                    elif cmd == "BOT_START":
+                        # Already running; mark as done.
+                        log("▶️ START command received (already running).", "SYSTEM")
+                        cmd_ok = True
 
                     # NOTE: Ops commands like CLOSE_TRADE / CLOSE_ALL_POSITIONS are handled by execution_monitor.py.
                     # main.py intentionally does NOT claim them (filtered claiming).
@@ -2269,6 +2298,9 @@ async def command_monitor_task():
                     except TypeError:
                         # backward-compatible fallback
                         db.mark_command_done(cid)
+            if restart_requested:
+                log("🔁 Restart command received. Exiting now...", "SYSTEM")
+                os._exit(3)
         except Exception as e:
             print(f"[WARN] Command Monitor Loop: {e}")
         await asyncio.sleep(2)
@@ -2281,23 +2313,31 @@ def system_health_check():
     Background thread to monitor system health and update DB.
     """
     print("❤️ Heartbeat Thread Started...")
+    try:
+        global _LAST_RESTART_BOT_REQ
+        _LAST_RESTART_BOT_REQ = str(db.get_setting("restart_bot_ack") or "").strip() or None
+    except Exception:
+        _LAST_RESTART_BOT_REQ = None
     while True:
 
         # Restart request (from dashboard). Works best when bot runs under a loop/supervisor.
         try:
-            global _LAST_RESTART_BOT_REQ
             req = str(db.get_setting("restart_bot_req") or "").strip()
-            if req and req != str(_LAST_RESTART_BOT_REQ or ""):
+            ack = str(db.get_setting("restart_bot_ack") or "").strip()
+            if req and req != ack and req != str(_LAST_RESTART_BOT_REQ or ""):
                 _LAST_RESTART_BOT_REQ = req
+                print(f"[SYSTEM] 🔁 Restart token detected: {req}")
                 try:
                     db.set_setting(
                         "restart_bot_ack",
-                        datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+                        req,
                         bump_version=False,
                         audit=False,
                     )
+                    print(f"[SYSTEM] ✅ Restart token acked: {req}")
                     # Clear the request to avoid restart loops on next boot
                     db.set_setting("restart_bot_req", "", bump_version=False, audit=False)
+                    print(f"[SYSTEM] 🧹 Restart token cleared: {req}")
                 except Exception:
                     pass
                 print("[SYSTEM] 🔁 Restart requested from Dashboard. Exiting now...")

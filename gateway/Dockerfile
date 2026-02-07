@@ -1,7 +1,7 @@
-FROM node:20-alpine AS ui
+FROM node:20-bullseye-slim AS ui
 WORKDIR /ui
 COPY services/brain/dashboard/package.json services/brain/dashboard/package-lock.json* ./
-RUN npm ci
+RUN npm ci --no-audit --no-fund
 COPY services/brain/dashboard/ ./
 RUN npm run build
 
@@ -12,6 +12,10 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1
 
 WORKDIR /app
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl \
+    && rm -rf /var/lib/apt/lists/*
 
 COPY gateway/requirements.txt /app/requirements.txt
 RUN pip install --upgrade pip \

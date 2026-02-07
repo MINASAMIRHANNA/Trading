@@ -9,6 +9,7 @@ import secrets
 # Public paths that do not require authentication.
 PUBLIC_PATHS = {
     "/login",
+    "/health",
     "/healthz",
     "/api/healthz",
     "/api/db_ready",

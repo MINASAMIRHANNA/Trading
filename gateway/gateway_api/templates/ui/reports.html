@@ -1,0 +1,174 @@
+{% extends "ui/base.html" %}
+{% block content %}
+  <div class="panel" style="margin-bottom: 16px;">
+    <div class="panel-head"><i class="fa-solid fa-chart-pie"></i> Reports</div>
+    <div class="form-row">
+      <div class="input-wrap"><label>From (UTC)</label><input id="rep-from" placeholder="2025-01-01" /></div>
+      <div class="input-wrap"><label>To (UTC)</label><input id="rep-to" placeholder="2025-12-31" /></div>
+      <div class="input-wrap"><label>Trace ID</label><input id="rep-trace" placeholder="trace_id" /></div>
+    </div>
+    <div class="inline-actions" style="margin-top: 10px;">
+      <button class="btn btn-secondary small-btn" onclick="loadReports()">Refresh</button>
+      <button class="btn btn-secondary small-btn" onclick="loadTrace()">Trace Lookup</button>
+    </div>
+  </div>
+
+  <div class="panel" style="margin-bottom: 16px;">
+    <div class="panel-head"><i class="fa-solid fa-trophy"></i> Paper / Arena Report</div>
+    <div class="kv-grid" id="rep-paper"></div>
+  </div>
+
+  <div class="panel" style="margin-bottom: 16px;">
+    <div class="panel-head"><i class="fa-solid fa-brain"></i> Analytics (Brain)</div>
+    <div class="kv-grid" id="rep-analytics"></div>
+  </div>
+
+  <div class="panel" style="margin-bottom: 16px;">
+    <div class="panel-head"><i class="fa-solid fa-magnifying-glass"></i> Deep Audit Lab</div>
+    <div class="table-wrap">
+      <table class="data-table">
+        <thead><tr><th>Source</th><th>Type</th><th>Detail</th></tr></thead>
+        <tbody id="rep-trace"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="panel" style="margin-bottom: 16px;">
+    <div class="panel-head"><i class="fa-solid fa-database"></i> Data Quality</div>
+    <div class="table-wrap">
+      <table class="data-table">
+        <thead><tr><th>Metric</th><th>Value</th></tr></thead>
+        <tbody id="rep-quality"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="panel" style="margin-bottom: 16px;">
+    <div class="panel-head"><i class="fa-solid fa-chart-column"></i> Extra Reports</div>
+    <div class="table-wrap" style="margin-bottom:12px;">
+      <table class="data-table"><thead><tr><th>Symbol</th><th>PnL</th></tr></thead><tbody id="rep-pnl"></tbody></table>
+    </div>
+    <div class="table-wrap" style="margin-bottom:12px;">
+      <table class="data-table"><thead><tr><th>Strategy</th><th>Win Rate</th><th>PnL</th></tr></thead><tbody id="rep-strategy"></tbody></table>
+    </div>
+    <div class="table-wrap" style="margin-bottom:12px;">
+      <table class="data-table"><thead><tr><th>Fee Type</th><th>Amount</th></tr></thead><tbody id="rep-fees"></tbody></table>
+    </div>
+    <div class="table-wrap">
+      <table class="data-table"><thead><tr><th>Risk Event</th><th>Count</th></tr></thead><tbody id="rep-risk"></tbody></table>
+    </div>
+  </div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function qs() {
+  const from = document.getElementById('rep-from').value || '';
+  const to = document.getElementById('rep-to').value || '';
+  return `from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`;
+}
+
+async function loadReports() {
+  try {
+    const [paper, analytics, pnl, strat, fees, risk, quality] = await Promise.all([
+      fetchJson(`/api/reports/paper-arena?${qs()}`),
+      fetchJson(`/api/reports/analytics?${qs()}`),
+      fetchJson(`/api/reports/pnl-breakdown?${qs()}`),
+      fetchJson(`/api/reports/strategy-performance?${qs()}`),
+      fetchJson(`/api/reports/fees-slippage?${qs()}`),
+      fetchJson(`/api/reports/risk-timeline?${qs()}`),
+      fetchJson(`/api/reports/data-quality?${qs()}`),
+    ]);
+
+    const paperEl = document.getElementById('rep-paper');
+    paperEl.innerHTML = '';
+    Object.entries(paper || {}).forEach(([k,v]) => {
+      const div = document.createElement('div');
+      div.className = 'kv-item';
+      div.innerHTML = `<div class="kv-label">${k}</div><div class="kv-value">${JSON.stringify(v)}</div>`;
+      paperEl.appendChild(div);
+    });
+
+    const anaEl = document.getElementById('rep-analytics');
+    anaEl.innerHTML = '';
+    Object.entries(analytics || {}).forEach(([k,v]) => {
+      const div = document.createElement('div');
+      div.className = 'kv-item';
+      div.innerHTML = `<div class="kv-label">${k}</div><div class="kv-value">${JSON.stringify(v)}</div>`;
+      anaEl.appendChild(div);
+    });
+
+    const pnlBody = document.getElementById('rep-pnl');
+    pnlBody.innerHTML = '';
+    (pnl.items || []).forEach((row) => {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `<td>${row.symbol || row.sym || '-'}</td><td>${row.pnl ?? row.value ?? '-'}</td>`;
+      pnlBody.appendChild(tr);
+    });
+
+    const stratBody = document.getElementById('rep-strategy');
+    stratBody.innerHTML = '';
+    (strat.items || []).forEach((row) => {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `<td>${row.strategy || '-'}</td><td>${row.win_rate ?? '-'}</td><td>${row.pnl ?? '-'}</td>`;
+      stratBody.appendChild(tr);
+    });
+
+    const feeBody = document.getElementById('rep-fees');
+    feeBody.innerHTML = '';
+    (fees.items || []).forEach((row) => {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `<td>${row.type || '-'}</td><td>${row.amount ?? '-'}</td>`;
+      feeBody.appendChild(tr);
+    });
+
+    const riskBody = document.getElementById('rep-risk');
+    riskBody.innerHTML = '';
+    (risk.items || []).forEach((row) => {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `<td>${row.event || '-'}</td><td>${row.count ?? '-'}</td>`;
+      riskBody.appendChild(tr);
+    });
+
+    const qBody = document.getElementById('rep-quality');
+    qBody.innerHTML = '';
+    const qItems = (quality.items || quality || {});
+    if (Array.isArray(qItems)) {
+      qItems.forEach((row) => {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `<td>${row.name || row.metric || '-'}</td><td>${row.value ?? '-'}</td>`;
+        qBody.appendChild(tr);
+      });
+    } else {
+      Object.entries(qItems).forEach(([k,v]) => {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `<td>${k}</td><td>${JSON.stringify(v)}</td>`;
+        qBody.appendChild(tr);
+      });
+    }
+
+  } catch (e) {
+    showToast(e.message || 'Failed to load reports', false);
+  }
+}
+
+async function loadTrace() {
+  const trace = document.getElementById('rep-trace').value || '';
+  if (!trace) return showToast('Trace ID required', false);
+  try {
+    const data = await fetchJson(`/api/reports/audit/trace?trace_id=${encodeURIComponent(trace)}`);
+    const body = document.getElementById('rep-trace');
+    body.innerHTML = '';
+    (data.items || data.events || []).forEach((row) => {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `<td>${row.source || '-'}</td><td>${row.type || row.event_type || '-'}</td><td>${JSON.stringify(row)}</td>`;
+      body.appendChild(tr);
+    });
+  } catch (e) {
+    showToast(e.message || 'Trace lookup failed', false);
+  }
+}
+
+loadReports();
+</script>
+{% endblock %}

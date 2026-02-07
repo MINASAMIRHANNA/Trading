@@ -4,8 +4,27 @@ import re
 from sqlalchemy import create_engine, event, text
 from sqlalchemy.engine import Engine
 
-# Default to SQLite for local development
-_RAW_DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./trading_intelligence.db")
+_ALLOW_SQLITE_DEV = str(
+    os.getenv("BRAIN_ALLOW_SQLITE_DEV")
+    or os.getenv("ALLOW_SQLITE_DEV")
+    or "0"
+).strip().lower() in {"1", "true", "yes", "on"}
+
+_EXPECTED_TRADING_PG_DSN = "postgresql://trading:trading@postgres:5432/trading"
+_EXPECTED_TRADING_PG_DSN = str(
+    os.getenv("EXPECTED_TRADING_PG_DSN") or _EXPECTED_TRADING_PG_DSN
+).strip()
+
+
+def _normalize_compare_dsn(url: str) -> str:
+    s = str(url or "").strip()
+    if s.startswith("postgres://"):
+        s = "postgresql://" + s[len("postgres://") :]
+    if s.startswith("postgresql+psycopg://"):
+        s = "postgresql://" + s[len("postgresql+psycopg://") :]
+    if s.startswith("postgresql+psycopg2://"):
+        s = "postgresql://" + s[len("postgresql+psycopg2://") :]
+    return s
 
 
 def _normalize_db_url(url: str) -> str:
@@ -25,7 +44,40 @@ def _normalize_db_url(url: str) -> str:
     return url
 
 
+def _require_single_db_runtime() -> str:
+    if _ALLOW_SQLITE_DEV:
+        # Explicit local-dev escape hatch.
+        return os.getenv("DATABASE_URL", "sqlite:///./brain.db")
+
+    trading_dsn = str(os.getenv("TRADING_PG_DSN") or "").strip()
+    if not trading_dsn:
+        raise RuntimeError(
+            "TRADING_PG_DSN is required for Brain service startup "
+            "(single-DB mode enforced)."
+        )
+    normalized_trading = _normalize_compare_dsn(trading_dsn)
+    normalized_expected = _normalize_compare_dsn(_EXPECTED_TRADING_PG_DSN)
+    if normalized_trading != normalized_expected:
+        raise RuntimeError(
+            f"TRADING_PG_DSN mismatch for Brain. expected={normalized_expected!r} got={normalized_trading!r}"
+        )
+
+    database_url = str(os.getenv("DATABASE_URL") or trading_dsn).strip()
+    normalized_db = _normalize_compare_dsn(database_url)
+    if normalized_db != normalized_expected:
+        raise RuntimeError(
+            f"DATABASE_URL mismatch for Brain. expected={normalized_expected!r} got={normalized_db!r}"
+        )
+    return database_url
+
+
+_RAW_DATABASE_URL = _require_single_db_runtime()
 DATABASE_URL = _normalize_db_url(_RAW_DATABASE_URL)
+
+if DATABASE_URL.startswith("sqlite") and not _ALLOW_SQLITE_DEV:
+    raise RuntimeError(
+        "SQLite backend is disabled for Brain. Set DATABASE_URL to Postgres or set BRAIN_ALLOW_SQLITE_DEV=1 for local-only development."
+    )
 
 
 def get_db_schema() -> str:
@@ -34,9 +86,10 @@ def get_db_schema() -> str:
     Kept for backward compatibility with earlier entrypoints.
     """
 
-    schema = os.getenv("DB_SCHEMA") or os.getenv("PG_SCHEMA") or "brain"
-    schema = schema.strip()
-    return schema or "brain"
+    schema = (os.getenv("DB_SCHEMA") or os.getenv("PG_SCHEMA") or "brain").strip() or "brain"
+    if schema != "brain":
+        raise RuntimeError(f"Invalid Brain schema {schema!r}. Expected 'brain'.")
+    return schema
 
 
 def _valid_schema_name(schema: str) -> bool:

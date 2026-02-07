@@ -1,6 +1,17 @@
 from datetime import date
 import pandas as pd
 
+
+def _to_json_scalar(value):
+    """Convert numpy/pandas scalars to native JSON-safe Python values."""
+    try:
+        if hasattr(value, "item"):
+            return value.item()
+    except Exception:
+        pass
+    return value
+
+
 def build_daily_summary(df: pd.DataFrame) -> dict:
     today = date.today()
 
@@ -28,7 +39,7 @@ def build_daily_summary(df: pd.DataFrame) -> dict:
     if "market_regime_encoded" in daily.columns and daily["market_regime_encoded"].notna().any():
         by_regime = daily.groupby("market_regime_encoded")["pnl_pct"].mean()
         if not by_regime.empty:
-            summary["best_regime"] = by_regime.idxmax()
-            summary["worst_regime"] = by_regime.idxmin()
+            summary["best_regime"] = _to_json_scalar(by_regime.idxmax())
+            summary["worst_regime"] = _to_json_scalar(by_regime.idxmin())
 
     return summary

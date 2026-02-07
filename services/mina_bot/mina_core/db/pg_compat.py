@@ -40,9 +40,9 @@ def _translate_sql(sql: str) -> str:
     if s.upper().startswith("PRAGMA "):
         return "-- PRAGMA ignored"
 
-    # BEGIN IMMEDIATE is sqlite-specific
+    # BEGIN IMMEDIATE is sqlite-specific; Postgres already opens tx automatically.
     if s.upper().startswith("BEGIN IMMEDIATE"):
-        return "BEGIN"
+        return "-- BEGIN IMMEDIATE ignored"
 
     # Placeholders: ? -> %s (psycopg)
     # NOTE: Mina_Bot doesn't use '?' inside string literals in SQL.
@@ -137,6 +137,8 @@ class CompatCursor:
         sql2 = _translate_sql(sql)
         if sql2.strip().startswith("-- PRAGMA ignored"):
             return self
+        if sql2.strip().startswith("-- BEGIN IMMEDIATE ignored"):
+            return self
         # psycopg (Postgres) will mark the current transaction as "aborted" after
         # a failed statement. If we don't rollback, every subsequent statement will
         # raise InFailedSqlTransaction. sqlite3 doesn't behave like this, so we
@@ -152,28 +154,52 @@ class CompatCursor:
             raise
 
         # Emulate sqlite3 cursor.lastrowid for INSERTs.
-        # NOTE: lastval() fails (and aborts the transaction) when no sequence
-        # has been used. Use a savepoint so failures don't poison the tx.
+        # Use table id sequence lookup instead of lastval() to avoid noisy
+        # transaction-abort errors when INSERT doesn't touch a sequence.
         self.lastrowid = None
         if sql2.lstrip().upper().startswith("INSERT") and "RETURNING" not in sql2.upper():
             try:
-                self._cur.execute("SAVEPOINT lastrowid")
-                try:
-                    # lastval() returns the last sequence value obtained in this session.
-                    self._cur.execute("SELECT lastval()")
-                    v = self._cur.fetchone()
-                    if v and v[0] is not None:
-                        self.lastrowid = int(v[0])
-                finally:
-                    try:
-                        self._cur.execute("RELEASE SAVEPOINT lastrowid")
-                    except Exception:
-                        # If release fails, rollback the savepoint to clear errors.
-                        try:
-                            self._cur.execute("ROLLBACK TO SAVEPOINT lastrowid")
-                            self._cur.execute("RELEASE SAVEPOINT lastrowid")
-                        except Exception:
-                            pass
+                m = re.match(r"^\s*INSERT\s+INTO\s+([^\s(]+)", sql2, flags=re.IGNORECASE)
+                table_ident = m.group(1) if m else None
+                if table_ident:
+                    raw_ident = table_ident.replace('"', "")
+                    if "." in raw_ident:
+                        schema_name, table_name = raw_ident.split(".", 1)
+                    else:
+                        schema_name, table_name = None, raw_ident
+
+                    # Only attempt serial-sequence lookup when the target table
+                    # actually has an "id" column. This avoids aborting the
+                    # transaction for key-value tables (e.g. settings).
+                    self._cur.execute(
+                        """
+                        SELECT 1
+                        FROM information_schema.columns
+                        WHERE table_schema = COALESCE(%s, current_schema())
+                          AND table_name = %s
+                          AND column_name = 'id'
+                        LIMIT 1
+                        """,
+                        (schema_name, table_name),
+                    )
+                    has_id = self._cur.fetchone() is not None
+                    if not has_id:
+                        return self
+
+                    table_name_for_seq = (
+                        f"{schema_name}.{table_name}" if schema_name else table_name
+                    )
+                    self._cur.execute(
+                        "SELECT pg_get_serial_sequence(%s, %s)",
+                        (table_name_for_seq, "id"),
+                    )
+                    seq_row = self._cur.fetchone()
+                    seq_name = seq_row[0] if seq_row else None
+                    if seq_name:
+                        self._cur.execute("SELECT currval(%s::regclass)", (seq_name,))
+                        id_row = self._cur.fetchone()
+                        if id_row and id_row[0] is not None:
+                            self.lastrowid = int(id_row[0])
             except Exception:
                 self.lastrowid = None
         return self

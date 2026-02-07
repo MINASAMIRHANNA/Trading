@@ -76,8 +76,8 @@ function pct(arr: number[], p: number): number {
   return sorted[idx];
 }
 
-export default function Performance() {
-  const [role, setRole] = useState<UnifiedRole>("paper");
+export default function Performance(props: { initialRole?: UnifiedRole; lockRole?: boolean }) {
+  const [role, setRole] = useState<UnifiedRole>(props.initialRole || "paper");
   const [limit, setLimit] = useState("200");
   const [fromTs, setFromTs] = useState("");
   const [toTs, setToTs] = useState("");
@@ -113,6 +113,10 @@ export default function Performance() {
     void load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [role]);
+
+  useEffect(() => {
+    if (props.initialRole) setRole(props.initialRole);
+  }, [props.initialRole]);
 
   const equityPoints = useMemo(() => {
     return equity
@@ -174,14 +178,16 @@ export default function Performance() {
       </Typography>
 
       <Box sx={{ display: "flex", gap: 2, flexWrap: "wrap", alignItems: "center" }}>
-        <FormControl size="small" sx={{ minWidth: 160 }}>
-          <InputLabel>Role</InputLabel>
-          <Select label="Role" value={role} onChange={(e) => setRole(e.target.value as UnifiedRole)}>
-            <MenuItem value="paper">paper</MenuItem>
-            <MenuItem value="live">live</MenuItem>
-            <MenuItem value="pump">pump</MenuItem>
-          </Select>
-        </FormControl>
+        {!props.lockRole ? (
+          <FormControl size="small" sx={{ minWidth: 160 }}>
+            <InputLabel>Role</InputLabel>
+            <Select label="Role" value={role} onChange={(e) => setRole(e.target.value as UnifiedRole)}>
+              <MenuItem value="paper">paper</MenuItem>
+              <MenuItem value="live">live</MenuItem>
+              <MenuItem value="pump">pump</MenuItem>
+            </Select>
+          </FormControl>
+        ) : null}
 
         <TextField size="small" label="Limit" value={limit} onChange={(e) => setLimit(e.target.value)} sx={{ width: 120 }} />
         <TextField size="small" label="From (ts)" value={fromTs} onChange={(e) => setFromTs(e.target.value)} sx={{ minWidth: 180 }} />

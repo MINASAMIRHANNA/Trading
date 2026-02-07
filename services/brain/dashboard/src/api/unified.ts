@@ -1,6 +1,7 @@
 import { api } from "./client";
 
 export type UnifiedRole = "paper" | "live" | "pump";
+type LiveGuard = { live_confirm?: boolean; live_confirm_ack?: boolean; live_pin?: string };
 
 export type UnifiedOverview = {
   brain: any;
@@ -23,37 +24,43 @@ export async function fetchUnifiedRoleSnapshot(role: UnifiedRole): Promise<any> 
   const { data } = await api.get(`/unified/${role}/snapshot`);
   return data;
 }
-export async function approveUnifiedSignal(role: UnifiedRole, signalId: number, note?: string, payload?: any): Promise<any> {
+export async function approveUnifiedSignal(role: UnifiedRole, signalId: number, note?: string, payload?: any, guard?: LiveGuard): Promise<any> {
   const body: any = {};
   if (note) body.note = note;
   if (payload && typeof payload === "object") body.payload = payload;
+  if (guard && typeof guard === "object") Object.assign(body, guard);
   const { data } = await api.post(`/unified/${role}/signals/${signalId}/approve`, body);
   return data;
 }
 
-export async function rejectUnifiedSignal(role: UnifiedRole, signalId: number, reason?: string, note?: string): Promise<any> {
+export async function rejectUnifiedSignal(role: UnifiedRole, signalId: number, reason?: string, note?: string, guard?: LiveGuard): Promise<any> {
   const body: any = {};
   if (reason) body.reason = reason;
   if (note) body.note = note;
+  if (guard && typeof guard === "object") Object.assign(body, guard);
   const { data } = await api.post(`/unified/${role}/signals/${signalId}/reject`, body);
   return data;
 }
 
-export async function queueUnifiedCommand(role: UnifiedRole, cmd: string, params?: any): Promise<any> {
-  const { data } = await api.post(`/unified/${role}/commands`, { cmd, params });
+export async function queueUnifiedCommand(role: UnifiedRole, cmd: string, params?: any, guard?: LiveGuard): Promise<any> {
+  const body: any = { cmd, params };
+  if (guard && typeof guard === "object") Object.assign(body, guard);
+  const { data } = await api.post(`/unified/${role}/commands`, body);
   return data;
 }
 
-export async function queueUnifiedCloseAll(role: UnifiedRole, reason?: string): Promise<any> {
+export async function queueUnifiedCloseAll(role: UnifiedRole, reason?: string, guard?: LiveGuard): Promise<any> {
   const body: any = {};
   if (reason) body.reason = reason;
+  if (guard && typeof guard === "object") Object.assign(body, guard);
   const { data } = await api.post(`/unified/${role}/commands/close_all`, body);
   return data;
 }
 
-export async function queueUnifiedKillSwitch(role: UnifiedRole, enabled: boolean, reason?: string): Promise<any> {
+export async function queueUnifiedKillSwitch(role: UnifiedRole, enabled: boolean, reason?: string, guard?: LiveGuard): Promise<any> {
   const body: any = { enabled };
   if (reason) body.reason = reason;
+  if (guard && typeof guard === "object") Object.assign(body, guard);
   const { data } = await api.post(`/unified/${role}/commands/kill_switch`, body);
   return data;
 }
@@ -151,18 +158,24 @@ export async function updateUnifiedEnvSecrets(role: UnifiedRole, payload: Record
   return data;
 }
 
-export async function clearUnifiedKillSwitch(role: UnifiedRole): Promise<any> {
-  const { data } = await api.post(`/unified/${role}/control/clear_kill_switch`, {});
+export async function clearUnifiedKillSwitch(role: UnifiedRole, guard?: LiveGuard): Promise<any> {
+  const body: any = {};
+  if (guard && typeof guard === "object") Object.assign(body, guard);
+  const { data } = await api.post(`/unified/${role}/control/clear_kill_switch`, body);
   return data;
 }
 
-export async function restartUnifiedBot(role: UnifiedRole): Promise<any> {
-  const { data } = await api.post(`/unified/${role}/control/restart_bot`, {});
+export async function restartUnifiedBot(role: UnifiedRole, guard?: LiveGuard): Promise<any> {
+  const body: any = {};
+  if (guard && typeof guard === "object") Object.assign(body, guard);
+  const { data } = await api.post(`/unified/${role}/control/restart_bot`, body);
   return data;
 }
 
-export async function restartUnifiedMonitor(role: UnifiedRole): Promise<any> {
-  const { data } = await api.post(`/unified/${role}/control/restart_monitor`, {});
+export async function restartUnifiedMonitor(role: UnifiedRole, guard?: LiveGuard): Promise<any> {
+  const body: any = {};
+  if (guard && typeof guard === "object") Object.assign(body, guard);
+  const { data } = await api.post(`/unified/${role}/control/restart_monitor`, body);
   return data;
 }
 

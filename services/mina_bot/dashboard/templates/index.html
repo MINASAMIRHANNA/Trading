@@ -8,6 +8,8 @@
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+    <script>window.DASHBOARD_READ_ONLY = {{ "true" if read_only else "false" }};</script>
+    <script defer src="/static/readonly.js"></script>
 </head>
 <body onload="try{window.loadSignalInbox && loadSignalInbox({status:(document.getElementById('signal-status-filter')||{}).value||'PENDING_APPROVAL',limit:30});}catch(e){}">
 

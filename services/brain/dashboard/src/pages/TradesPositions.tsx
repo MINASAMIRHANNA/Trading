@@ -19,30 +19,7 @@ import {
   Typography,
 } from "@mui/material";
 import { type UnifiedRole, fetchUnifiedPositions, fetchUnifiedTrades, fetchUnifiedTrade } from "../api/unified";
-
-function JsonBlock({ value }: { value: any }) {
-  let text = "";
-  try {
-    text = JSON.stringify(value ?? {}, null, 2);
-  } catch {
-    text = String(value ?? "");
-  }
-  return (
-    <Box
-      component="pre"
-      sx={{
-        m: 0,
-        p: 2,
-        overflowX: "auto",
-        whiteSpace: "pre-wrap",
-        wordBreak: "break-word",
-        fontSize: 12,
-      }}
-    >
-      {text}
-    </Box>
-  );
-}
+import KeyValueGrid from "../components/KeyValueGrid";
 
 export default function TradesPositions() {
   const [role, setRole] = useState<UnifiedRole>("paper");
@@ -235,7 +212,7 @@ export default function TradesPositions() {
               {detailError}
             </Typography>
           )}
-          <JsonBlock value={detailData} />
+          <KeyValueGrid data={detailData} />
         </DialogContent>
       </Dialog>
     </Box>

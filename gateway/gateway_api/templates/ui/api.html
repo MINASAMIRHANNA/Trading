@@ -1,0 +1,116 @@
+{% extends "ui/base.html" %}
+{% block content %}
+  <div class="panel" style="margin-bottom: 16px;">
+    <div class="panel-head"><i class="fa-solid fa-network-wired"></i> API Index</div>
+    <div class="note">Gateway API base: <code>/api</code>. Brain OpenAPI: <code>/api/brain/openapi.json</code>.</div>
+    <div class="note">Auth: pass <code>X-API-Key: &lt;GATEWAY_API_KEY&gt;</code> if enabled.</div>
+    <div class="table-wrap" style="margin-top: 10px;">
+      <table class="data-table">
+        <thead><tr><th>Service</th><th>Endpoints</th></tr></thead>
+        <tbody id="api-index-body"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="panel" style="margin-bottom: 16px;">
+    <div class="panel-head"><i class="fa-solid fa-plug"></i> Webhook Integration</div>
+    <div class="form-row">
+      <div class="input-wrap"><label>Webhook URL</label><input id="wh-url" placeholder="https://example.com/webhook" /></div>
+      <div class="input-wrap"><label>Secret</label><input id="wh-secret" placeholder="secret" /></div>
+      <div class="input-wrap"><label>Event Types (comma)</label><input id="wh-events" placeholder="SIGNAL_PUBLISH,TRADE_OPEN" /></div>
+    </div>
+    <div class="inline-actions" style="margin-top: 10px;">
+      <button class="btn btn-secondary small-btn" onclick="createWebhook()">Create Webhook</button>
+      <button class="btn btn-secondary small-btn" onclick="refreshWebhooks()">Refresh</button>
+    </div>
+    <div class="table-wrap" style="margin-top: 10px;">
+      <table class="data-table">
+        <thead><tr><th>ID</th><th>URL</th><th>Events</th><th>Enabled</th><th>Actions</th></tr></thead>
+        <tbody id="wh-body"></tbody>
+      </table>
+    </div>
+    <div class="note" style="margin-top: 8px;">
+      Example payload (SignalEvent): {"event_type":"SIGNAL_PUBLISH","bot_role":"paper","data":{...}}
+    </div>
+    <div class="note">Signature: optional header <code>X-Signature</code> = HMAC-SHA256(body, secret).</div>
+  </div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+async function loadApiIndex() {
+  try {
+    const data = await fetchJson('/api/api-index');
+    const body = document.getElementById('api-index-body');
+    body.innerHTML = '';
+    Object.entries(data || {}).forEach(([svc, endpoints]) => {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `<td>${svc}</td><td>${(endpoints || []).join(', ')}</td>`;
+      body.appendChild(tr);
+    });
+  } catch (e) {
+    showToast(e.message || 'API index failed', false);
+  }
+}
+
+async function refreshWebhooks() {
+  try {
+    const data = await fetchJson('/api/webhooks');
+    const body = document.getElementById('wh-body');
+    body.innerHTML = '';
+    (data.items || data || []).forEach((wh) => {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td>${wh.id}</td>
+        <td>${wh.url}</td>
+        <td>${(wh.event_types || []).join(', ')}</td>
+        <td>${wh.enabled}</td>
+        <td>
+          <button class="btn btn-secondary small-btn" onclick="testWebhook(${wh.id})">Test</button>
+          <button class="btn btn-danger small-btn" onclick="deleteWebhook(${wh.id})">Delete</button>
+        </td>
+      `;
+      body.appendChild(tr);
+    });
+  } catch (e) {
+    showToast(e.message || 'Webhook list failed', false);
+  }
+}
+
+async function createWebhook() {
+  const url = document.getElementById('wh-url').value;
+  const secret = document.getElementById('wh-secret').value;
+  const events = (document.getElementById('wh-events').value || '').split(',').map(s => s.trim()).filter(Boolean);
+  if (!url) return showToast('Webhook URL required', false);
+  try {
+    await fetchJson('/api/webhooks', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url, secret, event_types: events, enabled: true }) });
+    showToast('Webhook created');
+    refreshWebhooks();
+  } catch (e) {
+    showToast(e.message || 'Webhook create failed', false);
+  }
+}
+
+async function deleteWebhook(id) {
+  try {
+    await fetchJson(`/api/webhooks/${id}`, { method: 'DELETE' });
+    showToast('Webhook deleted');
+    refreshWebhooks();
+  } catch (e) {
+    showToast(e.message || 'Delete failed', false);
+  }
+}
+
+async function testWebhook(id) {
+  try {
+    await fetchJson(`/api/webhooks/test/${id}`, { method: 'POST' });
+    showToast('Webhook test sent');
+  } catch (e) {
+    showToast(e.message || 'Test failed', false);
+  }
+}
+
+loadApiIndex();
+refreshWebhooks();
+</script>
+{% endblock %}

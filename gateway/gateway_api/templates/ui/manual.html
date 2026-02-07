@@ -1,0 +1,208 @@
+{% extends "ui/base.html" %}
+{% block content %}
+  <div class="panel" style="margin-bottom: 16px;">
+    <div class="panel-head"><i class="fa-solid fa-hand"></i> Manual Ops</div>
+    <div class="form-row">
+      <div class="input-wrap">
+        <label>Role</label>
+        <select id="manual-role" class="dark-input">
+          <option value="paper">paper</option>
+          <option value="live">live</option>
+          <option value="pump">pump</option>
+        </select>
+      </div>
+      <div class="input-wrap">
+        <label>Symbol</label>
+        <input id="manual-symbol" placeholder="BTCUSDT" />
+      </div>
+      <div class="input-wrap">
+        <label>Side</label>
+        <select id="manual-side" class="dark-input">
+          <option value="LONG">LONG</option>
+          <option value="SHORT">SHORT</option>
+        </select>
+      </div>
+      <div class="input-wrap">
+        <label>Timeframe</label>
+        <input id="manual-timeframe" placeholder="5m" value="5m" />
+      </div>
+    </div>
+    <div class="form-row">
+      <div class="input-wrap">
+        <label>Strategy</label>
+        <input id="manual-strategy" placeholder="manual" value="manual" />
+      </div>
+      <div class="input-wrap">
+        <label>Confidence (0-1)</label>
+        <input id="manual-confidence" placeholder="0.7" value="0.7" />
+      </div>
+      <div class="input-wrap">
+        <label>Note</label>
+        <input id="manual-note" placeholder="optional" />
+      </div>
+    </div>
+    <div class="inline-actions">
+      <button class="btn btn-primary small-btn" onclick="publishSignal()">Publish Signal</button>
+    </div>
+  </div>
+
+  <div class="panel" style="margin-bottom: 16px;">
+    <div class="panel-head"><i class="fa-solid fa-square-check"></i> Approve / Reject</div>
+    <div class="form-row">
+      <div class="input-wrap">
+        <label>Signal ID</label>
+        <input id="manual-signal-id" placeholder="123" />
+      </div>
+      <div class="input-wrap">
+        <label>Decision Note</label>
+        <input id="manual-decision-note" placeholder="manual review" />
+      </div>
+    </div>
+    <div class="inline-actions">
+      <button class="btn btn-blue small-btn" onclick="approveSignal()">Approve</button>
+      <button class="btn btn-danger small-btn" onclick="rejectSignal()">Reject</button>
+    </div>
+  </div>
+
+  <div class="panel" style="margin-bottom: 16px;">
+    <div class="panel-head"><i class="fa-solid fa-ban"></i> Close Trade</div>
+    <div class="form-row">
+      <div class="input-wrap">
+        <label>Trade ID</label>
+        <input id="manual-trade-id" placeholder="456" />
+      </div>
+      <div class="input-wrap">
+        <label>Reason</label>
+        <input id="manual-close-reason" placeholder="manual_close" value="manual_close" />
+      </div>
+    </div>
+    <div class="inline-actions">
+      <button class="btn btn-warning small-btn" onclick="closeTrade()">Close Trade</button>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-head"><i class="fa-solid fa-gear"></i> Risk Controls</div>
+    <div class="form-row">
+      <div class="input-wrap">
+        <label>Kill Switch</label>
+        <select id="manual-kill" class="dark-input">
+          <option value="0">OFF</option>
+          <option value="1">ON</option>
+        </select>
+      </div>
+      <div class="input-wrap">
+        <label>Max Concurrent Trades</label>
+        <input id="manual-max-trades" placeholder="30" />
+      </div>
+      <div class="input-wrap">
+        <label>Max Trade USD</label>
+        <input id="manual-max-usd" placeholder="2000" />
+      </div>
+    </div>
+    <div class="inline-actions">
+      <button class="btn btn-secondary small-btn" onclick="saveRisk()">Save Risk Settings</button>
+    </div>
+  </div>
+
+  <div class="panel" style="margin-top:16px;">
+    <div class="panel-head"><i class="fa-solid fa-inbox"></i> Recent Signals</div>
+    <div class="table-wrap">
+      <table class="data-table">
+        <thead><tr><th>ID</th><th>Status</th><th>Symbol</th><th>Side</th><th>Confidence</th></tr></thead>
+        <tbody id="manual-signals"></tbody>
+      </table>
+    </div>
+  </div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function role() { return document.getElementById('manual-role').value || 'paper'; }
+
+async function publishSignal() {
+  const payload = {
+    symbol: document.getElementById('manual-symbol').value || 'BTCUSDT',
+    side: document.getElementById('manual-side').value || 'LONG',
+    timeframe: document.getElementById('manual-timeframe').value || '5m',
+    strategy: document.getElementById('manual-strategy').value || 'manual',
+    confidence: Number(document.getElementById('manual-confidence').value || 0.7),
+    note: document.getElementById('manual-note').value || '',
+  };
+  try {
+    await fetchJson(`/api/unified/${role()}/signals/publish`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+    showToast('Signal published');
+  } catch (e) {
+    showToast(e.message || 'Publish failed', false);
+  }
+}
+
+async function approveSignal() {
+  const id = document.getElementById('manual-signal-id').value;
+  if (!id) return showToast('Signal ID required', false);
+  const note = document.getElementById('manual-decision-note').value || 'manual approve';
+  try {
+    await fetchJson(`/api/unified/${role()}/signals/${id}/approve`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ note }) });
+    showToast('Signal approved');
+  } catch (e) {
+    showToast(e.message || 'Approve failed', false);
+  }
+}
+
+async function rejectSignal() {
+  const id = document.getElementById('manual-signal-id').value;
+  if (!id) return showToast('Signal ID required', false);
+  const note = document.getElementById('manual-decision-note').value || 'manual reject';
+  try {
+    await fetchJson(`/api/unified/${role()}/signals/${id}/reject`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ note }) });
+    showToast('Signal rejected');
+  } catch (e) {
+    showToast(e.message || 'Reject failed', false);
+  }
+}
+
+async function closeTrade() {
+  const id = document.getElementById('manual-trade-id').value;
+  if (!id) return showToast('Trade ID required', false);
+  const reason = document.getElementById('manual-close-reason').value || 'manual_close';
+  try {
+    await fetchJson(`/api/mina/${role()}/commands/queue`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ cmd: 'CLOSE_TRADE', params: { trade_id: Number(id), reason } }) });
+    showToast('Close queued');
+  } catch (e) {
+    showToast(e.message || 'Close failed', false);
+  }
+}
+
+async function saveRisk() {
+  const payload = {
+    kill_switch: document.getElementById('manual-kill').value,
+    max_concurrent_trades: document.getElementById('manual-max-trades').value,
+    max_trade_usd: document.getElementById('manual-max-usd').value,
+  };
+  try {
+    await fetchJson(`/api/unified/${role()}/settings`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+    showToast('Settings saved');
+  } catch (e) {
+    showToast(e.message || 'Settings update failed', false);
+  }
+}
+
+async function loadSignals() {
+  try {
+    const data = await fetchJson(`/api/unified/${role()}/signals?limit=10`);
+    const body = document.getElementById('manual-signals');
+    const items = data.items || data || [];
+    body.innerHTML = items.length ? '' : '<tr><td colspan=\"5\">No signals</td></tr>';
+    items.forEach((s) => {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `<td>${s.id ?? '-'}</td><td>${s.status ?? '-'}</td><td>${s.symbol ?? s.pair ?? '-'}</td><td>${s.side ?? s.signal ?? '-'}</td><td>${s.confidence ?? '-'}</td>`;
+      body.appendChild(tr);
+    });
+  } catch (e) {
+    // ignore
+  }
+}
+
+loadSignals();
+</script>
+{% endblock %}

@@ -56,7 +56,9 @@ def _read_settings(db_file: str) -> Dict[str, str]:
 
     settings: Dict[str, str] = {}
 
-    backend = (os.getenv("MINA_DB_BACKEND") or os.getenv("TRADING_DB_BACKEND") or "sqlite").strip().lower()
+    allow_sqlite_dev = str(os.getenv("ALLOW_SQLITE_DEV") or "0").strip().lower() in {"1", "true", "yes", "on"}
+    backend_default = "sqlite" if allow_sqlite_dev else "postgres"
+    backend = (os.getenv("MINA_DB_BACKEND") or os.getenv("TRADING_DB_BACKEND") or backend_default).strip().lower()
     is_postgres = backend.startswith("post")
 
     if is_postgres:
@@ -107,7 +109,10 @@ def _read_settings(db_file: str) -> Dict[str, str]:
             # If Postgres is selected but unavailable, fall back to empty settings
             return settings
 
-# SQLite path (legacy)
+# SQLite path (legacy; dev-only)
+    if not allow_sqlite_dev:
+        return settings
+
     try:
         con = sqlite3.connect(db_file, timeout=5)
         try:

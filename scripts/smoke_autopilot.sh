@@ -79,8 +79,8 @@ else
   }
 fi
 
-echo "== Audit Log (last 5) =="
-AUDIT_JSON="$(curl -sS "$GW_BASE/api/audit?limit=5")"
+echo "== Audit Log (last 50) =="
+AUDIT_JSON="$(curl -sS "$GW_BASE/api/audit?limit=50")"
 echo "$AUDIT_JSON" | show_json
 
 if [ "$JQ" = "jq" ]; then

@@ -12,14 +12,7 @@ import {
   Typography,
 } from "@mui/material";
 import { api } from "../api/client";
-
-function pretty(obj: any) {
-  try {
-    return JSON.stringify(obj, null, 2);
-  } catch {
-    return String(obj);
-  }
-}
+import KeyValueGrid from "../components/KeyValueGrid";
 
 export default function DecisionCenter() {
   const [symbol, setSymbol] = useState("BTCUSDT");
@@ -143,9 +136,11 @@ export default function DecisionCenter() {
           <Typography variant="subtitle1" sx={{ mb: 1 }}>
             Brain decision (via Gateway /api/decision)
           </Typography>
-          <Box component="pre" sx={{ p: 2, bgcolor: "background.default", borderRadius: 1, overflow: "auto" }}>
-            {decision ? pretty(decision) : loadingDecision ? "Loading..." : "No decision yet"}
-          </Box>
+          {decision ? (
+            <KeyValueGrid data={decision} />
+          ) : (
+            <Typography variant="body2">{loadingDecision ? "Loading..." : "No decision yet"}</Typography>
+          )}
 
           <Divider sx={{ my: 2 }} />
 
@@ -164,9 +159,7 @@ export default function DecisionCenter() {
               <Typography variant="subtitle2" sx={{ mb: 1 }}>
                 Stage result
               </Typography>
-              <Box component="pre" sx={{ p: 2, bgcolor: "background.default", borderRadius: 1, overflow: "auto" }}>
-                {pretty(stageResult)}
-              </Box>
+              <KeyValueGrid data={stageResult} />
             </Box>
           ) : null}
         </CardContent>

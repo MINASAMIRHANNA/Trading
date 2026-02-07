@@ -23,6 +23,7 @@ import requests
 from database import DatabaseManager
 from db_path import get_db_path
 from model_manager import ModelManager
+from service_registry import register_service
 
 # project modules (expected in your repo)
 from fetcher import fetch_klines
@@ -315,11 +316,21 @@ def main():
             args.db = get_db_path()
 
     db = DatabaseManager(args.db)
+    try:
+        register_service(
+            "pump_hunter",
+            role="pump",
+            schema_name=getattr(db, "pg_schema", None),
+            meta={"entrypoint": "pump_hunter.py"},
+        )
+    except Exception:
+        pass
     model = ModelManager("./models")
     model.reload()
 
     print(f"[PumpHunter] DB: {args.db}")
     print(f"[PumpHunter] Time: {_utc_iso()} (UTC)")
+    print("✅ Pump Hunter entrypoint: pump_hunter.py")
 
     _last_health_ms = 0
 

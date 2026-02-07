@@ -29,6 +29,7 @@ from datetime import datetime, timezone
 from database.base import Base
 from database.engine import ensure_schema, get_db_schema, get_engine
 from database.migrations import ensure_trade_features_columns
+from database.service_registry import register_service
 from database.session import SessionLocal
 from ingestion.mina.sync_trades import sync_mina_trades
 
@@ -99,6 +100,14 @@ def main() -> int:
     while not _Stop.value:
         try:
             _bootstrap_db()
+            try:
+                register_service(
+                    "brain_sync_worker",
+                    schema_name=get_db_schema(),
+                    meta={"component": "worker"},
+                )
+            except Exception:
+                pass
             break
         except Exception as e:
             print(f"🧠 [brain_sync_worker] waiting for DB... err={type(e).__name__}: {e}")

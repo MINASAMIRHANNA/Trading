@@ -1,0 +1,254 @@
+{
+  "ok": true,
+  "generated_at": "2026-02-06T00:00:00Z",
+  "endpoints": [
+    {
+      "method": "GET",
+      "route": "/api/unified/overview",
+      "description": "Unified overview across roles and brain status.",
+      "sample_curl": "curl -s http://localhost:8200/api/unified/overview"
+    },
+    {
+      "method": "GET",
+      "route": "/api/ops/status?role=paper|live|pump|all",
+      "description": "Aggregated runtime heartbeat, last decision, kill switch and error state per role.",
+      "sample_curl": "curl -s 'http://localhost:8200/api/ops/status?role=live'"
+    },
+    {
+      "method": "POST",
+      "route": "/api/ops/command",
+      "description": "Queue start/stop/restart commands for bot/monitor/pump.",
+      "sample_curl": "curl -s -X POST http://localhost:8200/api/ops/command -H 'Content-Type: application/json' -d '{\"role\":\"paper\",\"target\":\"bot\",\"action\":\"restart\"}'"
+    },
+    {
+      "method": "GET",
+      "route": "/api/ops/db_fingerprint",
+      "description": "Single-DB runtime fingerprint (database, host, schemas, version).",
+      "sample_curl": "curl -s http://localhost:8200/api/ops/db_fingerprint"
+    },
+    {
+      "method": "GET",
+      "route": "/api/ops/runtime?role=pump",
+      "description": "Runtime state per role including pump entrypoint and heartbeat.",
+      "sample_curl": "curl -s 'http://localhost:8200/api/ops/runtime?role=pump'"
+    },
+    {
+      "method": "GET",
+      "route": "/api/unified/positions?role=paper|live&limit=100",
+      "description": "Open positions per role via Gateway DB aggregation.",
+      "sample_curl": "curl -s 'http://localhost:8200/api/unified/positions?role=paper&limit=100'"
+    },
+    {
+      "method": "GET",
+      "route": "/api/unified/logs?role=all&limit=200&level=ERROR",
+      "description": "Unified role logs with optional level filter.",
+      "sample_curl": "curl -s 'http://localhost:8200/api/unified/logs?role=all&level=ERROR&limit=50'"
+    },
+    {
+      "method": "GET",
+      "route": "/api/unified/errors?role=all&limit=100",
+      "description": "Aggregated recent error logs.",
+      "sample_curl": "curl -s 'http://localhost:8200/api/unified/errors?role=all&limit=50'"
+    },
+    {
+      "method": "GET",
+      "route": "/api/portfolio/summary?role=paper|live&from=&to=",
+      "description": "Portfolio summary KPIs including win rate and fees.",
+      "sample_curl": "curl -s 'http://localhost:8200/api/portfolio/summary?role=paper'"
+    },
+    {
+      "method": "GET",
+      "route": "/api/portfolio/equity?role=paper|live&from=&to=",
+      "description": "Merged equity curve and per-role equity points.",
+      "sample_curl": "curl -s 'http://localhost:8200/api/portfolio/equity?role=live'"
+    },
+    {
+      "method": "GET",
+      "route": "/api/portfolio/binance/account?from=&to=",
+      "description": "Binance balances/positions and realized/unrealized pnl + fees (read-only).",
+      "sample_curl": "curl -s 'http://localhost:8200/api/portfolio/binance/account?from=2026-02-01T00:00:00Z&to=2026-02-06T00:00:00Z'"
+    },
+    {
+      "method": "GET",
+      "route": "/api/portfolio/export.csv?role=paper|live&from=&to=",
+      "description": "Export DB-backed portfolio trades as CSV.",
+      "sample_curl": "curl -s 'http://localhost:8200/api/portfolio/export.csv?role=live' -o portfolio.csv"
+    },
+    {
+      "method": "GET",
+      "route": "/api/portfolio/binance/export.csv?from=&to=",
+      "description": "Export Binance income/balances/positions as CSV.",
+      "sample_curl": "curl -s 'http://localhost:8200/api/portfolio/binance/export.csv' -o binance_portfolio.csv"
+    },
+    {
+      "method": "GET",
+      "route": "/api/reports/paper_arena",
+      "description": "Paper arena report.",
+      "sample_curl": "curl -s http://localhost:8200/api/reports/paper_arena"
+    },
+    {
+      "method": "GET",
+      "route": "/api/reports/analytics",
+      "description": "Analytics report from brain overview.",
+      "sample_curl": "curl -s http://localhost:8200/api/reports/analytics"
+    },
+    {
+      "method": "GET",
+      "route": "/api/reports/deep_audit_lab",
+      "description": "Deep audit lab events and trace replay.",
+      "sample_curl": "curl -s 'http://localhost:8200/api/reports/deep_audit_lab?role=paper'"
+    },
+    {
+      "method": "GET",
+      "route": "/api/reports/daily_summary",
+      "description": "Daily summary from brain endpoints through gateway.",
+      "sample_curl": "curl -s http://localhost:8200/api/reports/daily_summary"
+    },
+    {
+      "method": "GET",
+      "route": "/api/reports/strategy_compare",
+      "description": "Strategy compare report from brain endpoints through gateway.",
+      "sample_curl": "curl -s http://localhost:8200/api/reports/strategy_compare"
+    },
+    {
+      "method": "GET",
+      "route": "/api/doctor/checks",
+      "description": "Doctor checks including write-path/event-ingestion/brain-sync-lag tests.",
+      "sample_curl": "curl -s 'http://localhost:8200/api/doctor/checks?run_tests=true'"
+    },
+    {
+      "method": "GET",
+      "route": "/api/doctor/incidents?limit=50",
+      "description": "Incident feed with suggested fix + trace_id copy support.",
+      "sample_curl": "curl -s 'http://localhost:8200/api/doctor/incidents?limit=50'"
+    },
+    {
+      "method": "GET",
+      "route": "/api/live/safety_policy",
+      "description": "Live safety policy (double-confirm/PIN/risk caps) and runtime snapshot.",
+      "sample_curl": "curl -s http://localhost:8200/api/live/safety_policy"
+    },
+    {
+      "method": "POST",
+      "route": "/api/live/safety_policy",
+      "description": "Update live safety policy and optional PIN hash.",
+      "sample_curl": "curl -s -X POST http://localhost:8200/api/live/safety_policy -H 'Content-Type: application/json' -d '{\"execution_enabled\":false,\"live_confirm\":true,\"live_confirm_ack\":true}'"
+    },
+    {
+      "method": "GET",
+      "route": "/api/live/rollout",
+      "description": "Get rollout stage (LIVE-0/LIVE-1/LIVE-2).",
+      "sample_curl": "curl -s http://localhost:8200/api/live/rollout"
+    },
+    {
+      "method": "POST",
+      "route": "/api/live/rollout",
+      "description": "Set rollout stage profile and caps.",
+      "sample_curl": "curl -s -X POST http://localhost:8200/api/live/rollout -H 'Content-Type: application/json' -d '{\"stage\":\"LIVE-1\",\"live_confirm\":true,\"live_confirm_ack\":true}'"
+    },
+    {
+      "method": "GET",
+      "route": "/api/learn/state",
+      "description": "Learning state in brain schema tables.",
+      "sample_curl": "curl -s http://localhost:8200/api/learn/state"
+    },
+    {
+      "method": "GET",
+      "route": "/api/learn/kpis?role=paper|live|pump",
+      "description": "Learning KPIs: precision-high-confidence, abstention rate, drift indicators.",
+      "sample_curl": "curl -s 'http://localhost:8200/api/learn/kpis?role=live'"
+    },
+    {
+      "method": "POST",
+      "route": "/api/learn/train",
+      "description": "Trigger manual training and update candidate model metadata.",
+      "sample_curl": "curl -s -X POST http://localhost:8200/api/learn/train -H 'Content-Type: application/json' -d '{\"role\":\"paper\"}'"
+    },
+    {
+      "method": "POST",
+      "route": "/api/learn/promote",
+      "description": "Promote candidate model to deployed model for a role.",
+      "sample_curl": "curl -s -X POST http://localhost:8200/api/learn/promote -H 'Content-Type: application/json' -d '{\"role\":\"paper\"}'"
+    },
+    {
+      "method": "POST",
+      "route": "/api/learn/rollback",
+      "description": "Rollback deployed model to previous version for a role.",
+      "sample_curl": "curl -s -X POST http://localhost:8200/api/learn/rollback -H 'Content-Type: application/json' -d '{\"role\":\"paper\"}'"
+    },
+    {
+      "method": "GET",
+      "route": "/api/brain/inspector/overview",
+      "description": "Brain inspector overview for trades/win_rate/expectancy.",
+      "sample_curl": "curl -s 'http://localhost:8200/api/brain/inspector/overview?role=paper'"
+    },
+    {
+      "method": "GET",
+      "route": "/api/brain/inspector/features_sample",
+      "description": "Feature-store sample rows from brain.trade_features.",
+      "sample_curl": "curl -s 'http://localhost:8200/api/brain/inspector/features_sample?limit=20'"
+    },
+    {
+      "method": "GET",
+      "route": "/api/brain/inspector/decision_traces",
+      "description": "Decision traces filtered by trace_id / decision_id.",
+      "sample_curl": "curl -s 'http://localhost:8200/api/brain/inspector/decision_traces?role=paper&limit=50'"
+    },
+    {
+      "method": "GET",
+      "route": "/api/brain/inspector/traces?limit=20",
+      "description": "Backward-compatible alias for decision traces.",
+      "sample_curl": "curl -s 'http://localhost:8200/api/brain/inspector/traces?limit=20'"
+    },
+    {
+      "method": "POST",
+      "route": "/api/manual/execute",
+      "description": "Queue manual execution with trace_id audit and paper simulation support.",
+      "sample_curl": "curl -s -X POST http://localhost:8200/api/manual/execute -H 'Content-Type: application/json' -d '{\"role\":\"paper\",\"symbol\":\"BTCUSDT\",\"amount_usd\":100,\"market\":\"futures\",\"direction\":\"LONG\"}'"
+    },
+    {
+      "method": "GET",
+      "route": "/api/snapshot?from=&to=&role=",
+      "description": "Historical snapshot (UTC) for trades/events/decisions + replay traces.",
+      "sample_curl": "curl -s 'http://localhost:8200/api/snapshot?role=paper'"
+    },
+    {
+      "method": "POST",
+      "route": "/api/snapshot",
+      "description": "Point-in-time snapshot for candle+indicators+pump score at UTC timestamp.",
+      "sample_curl": "curl -s -X POST http://localhost:8200/api/snapshot -H 'Content-Type: application/json' -d '{\"role\":\"paper\",\"symbol\":\"SOLUSDT\",\"market\":\"futures\",\"interval\":\"5m\",\"at_utc\":\"2026-02-06T12:30:00Z\"}'"
+    },
+    {
+      "method": "GET",
+      "route": "/api/notifications/settings",
+      "description": "Get Telegram notification settings stored in Postgres settings table.",
+      "sample_curl": "curl -s http://localhost:8200/api/notifications/settings"
+    },
+    {
+      "method": "POST",
+      "route": "/api/notifications/settings",
+      "description": "Update Telegram notification settings.",
+      "sample_curl": "curl -s -X POST http://localhost:8200/api/notifications/settings -H 'Content-Type: application/json' -d '{\"enabled\":true,\"chat_id\":\"12345\"}'"
+    },
+    {
+      "method": "POST",
+      "route": "/api/notifications/test",
+      "description": "Send test Telegram message with configured settings.",
+      "sample_curl": "curl -s -X POST http://localhost:8200/api/notifications/test"
+    },
+    {
+      "method": "POST",
+      "route": "/api/pump/candidates/promote",
+      "description": "Promote pump candidate into paper/live inbox with audit trace.",
+      "sample_curl": "curl -s -X POST http://localhost:8200/api/pump/candidates/promote -H 'Content-Type: application/json' -d '{\"id\":123,\"target_role\":\"paper\",\"side\":\"LONG\"}'"
+    }
+  ],
+  "webhook_integration": {
+    "inbound_endpoint": "/api/webhooks",
+    "auth": {
+      "header": "X-Webhook-Token",
+      "description": "Set gateway webhook token and include it in X-Webhook-Token header for each request."
+    },
+    "sample_curl": "curl -s -X POST http://localhost:8200/api/webhooks -H 'Content-Type: application/json' -H 'X-Webhook-Token: <token>' -d '{\"event_type\":\"SignalEvent\"}'"
+  }
+}

@@ -380,7 +380,7 @@ def ensure_commands_table(conn, lock: Optional[object] = None) -> None:
         run_ddl(conn, [_COMMANDS_TABLE_SQL])
         # Additive schema updates (safe to ignore if already applied)
         try:
-            run_ddl(conn, ["ALTER TABLE commands ADD COLUMN trace_id TEXT"])
+            run_ddl(conn, ["ALTER TABLE commands ADD COLUMN IF NOT EXISTS trace_id TEXT"])
         except Exception:
             # column may already exist
             pass

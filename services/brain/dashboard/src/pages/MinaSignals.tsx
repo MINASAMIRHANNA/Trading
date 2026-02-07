@@ -29,37 +29,13 @@ import {
   rejectUnifiedSignal,
   fetchUnifiedSignalDecision,
 } from "../api/unified";
+import KeyValueGrid from "../components/KeyValueGrid";
+import { requestLiveGuard } from "../utils/liveGuard";
 
 const StatusChip = ({ status }: { status: any }) => {
   const s = String(status || "UNKNOWN").toUpperCase();
   return <Chip size="small" label={s} />;
 };
-
-function JsonBlock({ value }: { value: any }) {
-  const text = useMemo(() => {
-    try {
-      return JSON.stringify(value, null, 2);
-    } catch {
-      return String(value);
-    }
-  }, [value]);
-
-  return (
-    <Box
-      component="pre"
-      sx={{
-        m: 0,
-        p: 2,
-        overflowX: "auto",
-        whiteSpace: "pre-wrap",
-        wordBreak: "break-word",
-        fontSize: 12,
-      }}
-    >
-      {text}
-    </Box>
-  );
-}
 
 export default function MinaSignals() {
   const [role, setRole] = useState<UnifiedRole>("paper");
@@ -101,8 +77,10 @@ export default function MinaSignals() {
   };
 
   const doApprove = async (it: any) => {
+    const guard = role === "live" ? await requestLiveGuard(`Approve signal #${it?.id}`) : null;
+    if (role === "live" && !guard) return;
     try {
-      const r = await approveUnifiedSignal(role, Number(it.id), "Approved via Unified UI");
+      const r = await approveUnifiedSignal(role, Number(it.id), "Approved via Unified UI", undefined, guard || undefined);
       setSnack({ open: true, msg: `Approved signal #${it.id} (audit_id=${r?.audit_id ?? "?"})`, severity: "success" });
       await reload();
     } catch (e: any) {
@@ -111,8 +89,10 @@ export default function MinaSignals() {
   };
 
   const doReject = async (it: any) => {
+    const guard = role === "live" ? await requestLiveGuard(`Reject signal #${it?.id}`) : null;
+    if (role === "live" && !guard) return;
     try {
-      const r = await rejectUnifiedSignal(role, Number(it.id), "rejected", "Rejected via Unified UI");
+      const r = await rejectUnifiedSignal(role, Number(it.id), "rejected", "Rejected via Unified UI", guard || undefined);
       setSnack({ open: true, msg: `Rejected signal #${it.id} (audit_id=${r?.audit_id ?? "?"})`, severity: "success" });
       await reload();
     } catch (e: any) {
@@ -173,6 +153,12 @@ export default function MinaSignals() {
           Refresh
         </Button>
       </Box>
+
+      {role === "live" ? (
+        <Alert severity="warning" sx={{ mt: 2 }}>
+          LIVE safety policy applies: double-confirm and optional PIN are required for write actions.
+        </Alert>
+      ) : null}
 
       <Divider sx={{ my: 2 }} />
 
@@ -245,7 +231,7 @@ export default function MinaSignals() {
           ) : decisionErr ? (
             <Alert severity="error">{decisionErr}</Alert>
           ) : decisionData ? (
-            <JsonBlock value={decisionData} />
+            <KeyValueGrid data={decisionData} />
           ) : (
             <Typography variant="body2">No data</Typography>
           )}
@@ -263,5 +249,3 @@ export default function MinaSignals() {
     </Box>
   );
 }
-
-

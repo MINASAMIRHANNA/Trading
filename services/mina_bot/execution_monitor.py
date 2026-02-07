@@ -5,7 +5,16 @@ from datetime import datetime, timezone
 from binance.client import Client
 from config import cfg
 from database import DatabaseManager
-from trading_executor import ensure_stop_loss, ensure_hard_tp, ensure_trailing_stop, close_open_position
+from service_registry import register_service
+from trading_executor import (
+    ensure_stop_loss,
+    ensure_hard_tp,
+    ensure_trailing_stop,
+    close_open_position,
+    is_paper_trading,
+    _get_symbol_precision,
+    _format_val,
+)
 
 
 import os
@@ -101,12 +110,26 @@ class ExecutionMonitor:
         if self.bot_role == "arena":
             self.bot_role = "paper"
         self.is_pump = self.bot_role == "pump"
+        try:
+            register_service(
+                "mina_monitor",
+                role=self.bot_role or None,
+                schema_name=getattr(self.db, "pg_schema", None),
+                meta={"entrypoint": "services/mina_bot/execution_monitor.py"},
+            )
+        except Exception:
+            pass
 
         self.running = True
         self._last_health_event_ms = 0
 
         # Restart request tracking (from dashboard)
         self._last_restart_req = None
+        try:
+            # Initialize from DB to avoid restart loops after container restarts
+            self._last_restart_req = str(self.db.get_setting("restart_monitor_ack") or "").strip() or None
+        except Exception:
+            self._last_restart_req = None
 
         # Positions cache (for Project Doctor)
         self._positions_cache = {}  # symbol -> snapshot dict
@@ -299,11 +322,18 @@ class ExecutionMonitor:
                 return
             self._last_cmd_poll_ts = now_ts
 
+            restart_requested = False
             commands = self._claim_pending_commands_filtered(
                 only_cmds=(
                     'CHECK_PROTECTION_NOW',
                     'CLOSE_TRADE',
                     'CLOSE_ALL_POSITIONS',
+                    'RESTART_MONITOR',
+                    'MONITOR_RESTART',
+                    'MONITOR_STOP',
+                    'MONITOR_START',
+                    'REDUCE_POSITION',
+                    'UPDATE_SLTP',
                 ),
                 limit=50,
                 worker='execution_monitor',
@@ -328,6 +358,155 @@ class ExecutionMonitor:
                             self.db.set_setting('protection_audit_force', tok, source='execution_monitor')
                         # Run immediately in this cycle.
                         self._maybe_protection_audit(active_trades)
+
+                    elif c in ('RESTART_MONITOR', 'MONITOR_RESTART'):
+                        restart_requested = True
+                        cmd_ok = True
+
+                    elif c == 'MONITOR_STOP':
+                        print("[EXEC_MON] 🛑 STOP command received. Exiting now...")
+                        restart_requested = True
+                        cmd_ok = True
+
+                    elif c == 'MONITOR_START':
+                        # Already running; acknowledge command.
+                        print("[EXEC_MON] ▶️ START command received (already running).")
+                        cmd_ok = True
+
+                    elif c == 'UPDATE_SLTP':
+                        trade_id = params.get('trade_id') or params.get('id')
+                        symbol = params.get('symbol')
+                        stop_loss = params.get('stop_loss')
+                        take_profits = params.get('take_profits')
+
+                        if not symbol and trade_id:
+                            try:
+                                rec = self.db.get_trade_by_id(int(trade_id))
+                                symbol = (rec or {}).get('symbol')
+                            except Exception:
+                                symbol = None
+
+                        if not symbol:
+                            raise ValueError("UPDATE_SLTP missing symbol/trade_id")
+
+                        try:
+                            # Update DB fields (safe for both sqlite/pg compat)
+                            conn = getattr(self.db, 'conn', None)
+                            lock = getattr(self.db, 'lock', None)
+                            if conn is not None:
+                                set_parts = []
+                                vals = []
+                                if stop_loss is not None:
+                                    set_parts.append("stop_loss=?")
+                                    vals.append(float(stop_loss))
+                                if take_profits is not None:
+                                    set_parts.append("take_profits=?")
+                                    if isinstance(take_profits, (list, dict)):
+                                        vals.append(json.dumps(take_profits))
+                                    else:
+                                        vals.append(take_profits)
+                                if set_parts:
+                                    vals.append(int(trade_id) if trade_id else symbol)
+                                    where = "id=?" if trade_id else "symbol=?"
+                                    sql = f"UPDATE trades SET {', '.join(set_parts)} WHERE {where}"
+                                    if lock is None:
+                                        conn.execute(sql, tuple(vals))
+                                        conn.commit()
+                                    else:
+                                        with lock:
+                                            conn.execute(sql, tuple(vals))
+                                            conn.commit()
+                            # Force protection audit to apply new SL/TP
+                            tok = str(int(time.time() * 1000))
+                            try:
+                                self.db.set_setting('protection_audit_force', tok, source='execution_monitor', bump_version=False, audit=False)
+                            except Exception:
+                                pass
+                        except Exception as e:
+                            raise ValueError(f"UPDATE_SLTP failed: {e}")
+
+                    elif c == 'REDUCE_POSITION':
+                        trade_id = params.get('trade_id') or params.get('id')
+                        symbol = params.get('symbol')
+                        reduce_pct = params.get('reduce_pct') or params.get('percent') or params.get('pct')
+                        reduce_qty = params.get('reduce_qty') or params.get('qty')
+
+                        if not symbol and trade_id:
+                            try:
+                                rec = self.db.get_trade_by_id(int(trade_id))
+                                symbol = (rec or {}).get('symbol')
+                            except Exception:
+                                symbol = None
+
+                        if not symbol:
+                            raise ValueError("REDUCE_POSITION missing symbol/trade_id")
+
+                        # Determine current position size from exchange
+                        pos_amt = 0.0
+                        try:
+                            positions = self.client.futures_position_information(symbol=symbol) or []
+                            if not isinstance(positions, list):
+                                positions = []
+                            for p in positions:
+                                amt = float(p.get("positionAmt", 0) or 0)
+                                if abs(amt) > 0:
+                                    pos_amt = amt
+                                    break
+                        except Exception:
+                            pos_amt = 0.0
+
+                        if abs(pos_amt) <= 0:
+                            raise ValueError("No open position to reduce")
+
+                        qty = 0.0
+                        try:
+                            if reduce_qty is not None:
+                                qty = float(reduce_qty)
+                            elif reduce_pct is not None:
+                                pct = float(reduce_pct)
+                                if pct > 1:
+                                    pct = pct / 100.0
+                                qty = abs(pos_amt) * max(0.0, min(1.0, pct))
+                        except Exception:
+                            qty = 0.0
+
+                        if qty <= 0:
+                            raise ValueError("Invalid reduce qty")
+
+                        side = "SELL" if pos_amt > 0 else "BUY"
+
+                        # Paper/test: adjust DB quantity only
+                        if is_paper_trading():
+                            try:
+                                rec = self.db.get_active_trade(symbol)
+                                if rec:
+                                    cur_qty = float(rec.get("quantity") or 0)
+                                    new_qty = max(0.0, cur_qty - qty)
+                                    conn = getattr(self.db, 'conn', None)
+                                    lock = getattr(self.db, 'lock', None)
+                                    if conn is not None:
+                                        if lock is None:
+                                            conn.execute("UPDATE trades SET quantity=? WHERE id=?", (new_qty, int(rec.get("id"))))
+                                            conn.commit()
+                                        else:
+                                            with lock:
+                                                conn.execute("UPDATE trades SET quantity=? WHERE id=?", (new_qty, int(rec.get("id"))))
+                                                conn.commit()
+                                    if new_qty <= 0:
+                                        self.db.close_trade(int(rec.get("id")), reason="REDUCE_POSITION_FULL", close_price=float(rec.get("current_price") or 0))
+                            except Exception:
+                                pass
+                        else:
+                            prec = _get_symbol_precision(symbol)
+                            if prec:
+                                qty = _format_val(float(qty), prec['step_size'], prec['qty_precision'])
+                            self.client.futures_create_order(
+                                symbol=symbol,
+                                side=side,
+                                type="MARKET",
+                                quantity=float(qty),
+                                reduceOnly=True,
+                            )
 
                     elif c == 'CLOSE_TRADE':
 
@@ -643,6 +822,9 @@ class ExecutionMonitor:
                             self.db.mark_command_done(int(cid))
                         except Exception:
                             pass
+            if restart_requested:
+                print("[EXEC_MON] 🔁 Restart command received. Exiting now...")
+                os._exit(3)
         except Exception:
             return
 
@@ -671,16 +853,31 @@ class ExecutionMonitor:
                 # Restart request (from dashboard). Works best when monitor runs under a loop/supervisor.
                 try:
                     req = str(self.db.get_setting("restart_monitor_req") or "").strip()
-                    if req and req != str(self._last_restart_req or ""):
+                    ack = str(self.db.get_setting("restart_monitor_ack") or "").strip()
+                    if req and req != ack and req != str(self._last_restart_req or ""):
                         self._last_restart_req = req
+                        print(f"[EXEC_MON] 🔁 Restart token detected: {req}")
                         try:
                             self.db.set_setting(
                                 "restart_monitor_ack",
-                                datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+                                req,
                                 source="execution_monitor",
                                 bump_version=False,
                                 audit=False,
                             )
+                            print(f"[EXEC_MON] ✅ Restart token acked: {req}")
+                        except Exception:
+                            pass
+                        # Clear the request so a supervisor restart doesn't loop forever.
+                        try:
+                            self.db.set_setting(
+                                "restart_monitor_req",
+                                "",
+                                source="execution_monitor",
+                                bump_version=False,
+                                audit=False,
+                            )
+                            print(f"[EXEC_MON] 🧹 Restart token cleared: {req}")
                         except Exception:
                             pass
                         print("[EXEC_MON] 🔁 Restart requested from Dashboard. Exiting now...")
@@ -805,7 +1002,9 @@ class ExecutionMonitor:
             return
 
         try:
-            positions = self._api_call("position_info", self.client.futures_position_information, symbol=symbol)
+            positions = self._api_call("position_info", self.client.futures_position_information, symbol=symbol) or []
+            if not isinstance(positions, list):
+                positions = []
 
             pos_amt = 0.0
             pos_hit = None

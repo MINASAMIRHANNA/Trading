@@ -46,6 +46,8 @@
         #loading { text-align: center; color: var(--accent); margin-top: 80px; font-weight: bold; }
         ul#insightsList { padding-left: 20px; font-size: 0.85rem; color: #bbb; line-height: 1.6; }
     </style>
+    <script>window.DASHBOARD_READ_ONLY = {{ "true" if read_only else "false" }};</script>
+    <script defer src="/static/readonly.js"></script>
 </head>
 <body>
     <div class="container">

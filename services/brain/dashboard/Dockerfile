@@ -4,7 +4,7 @@ WORKDIR /app
 
 # Install deps first (better caching)
 COPY package.json package-lock.json* ./
-RUN npm ci
+RUN npm install --no-audit --no-fund
 
 COPY . ./
 

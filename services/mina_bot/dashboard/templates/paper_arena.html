@@ -49,6 +49,8 @@
 
     .status-line { margin-top: 6px; color: var(--muted); font-size: 0.85rem; }
   </style>
+    <script>window.DASHBOARD_READ_ONLY = {{ "true" if read_only else "false" }};</script>
+    <script defer src="/static/readonly.js"></script>
 </head>
 
 <body>

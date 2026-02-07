@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>{{ title or "Ops Dashboard" }}</title>
+  <link rel="stylesheet" href="/ui/static/style.css" />
+  <link rel="stylesheet" href="/ui/static/ui_extra.css" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet" />
+</head>
+<body>
+  <header class="header">
+    <div class="brand"><i class="fa-solid fa-chart-simple"></i> Trade Pro Ops</div>
+    <div class="header-controls">
+      <div class="status-pill"><span class="dot green"></span> <span id="ui-status">Connected</span></div>
+      <a class="btn btn-secondary" href="/">Unified App</a>
+    </div>
+  </header>
+
+  <div class="main-layout">
+    <aside class="sidebar">
+      <div class="panel">
+        <div class="panel-head"><i class="fa-solid fa-compass"></i> Navigation</div>
+        <div class="nav-list">
+          <a class="nav-link" href="/ui/ops">Ops Live</a>
+          <a class="nav-link" href="/ui/portfolio">Portfolio</a>
+          <a class="nav-link" href="/ui/manual">Manual Ops</a>
+          <a class="nav-link" href="/ui/reports">Reports</a>
+          <a class="nav-link" href="/ui/doctor">Project Doctor</a>
+          <a class="nav-link" href="/ui/api">API</a>
+          <a class="nav-link" href="/ui/learn">Learn</a>
+          <a class="nav-link" href="/ui/alerts">Alerts</a>
+          <a class="nav-link" href="/ui/go_live">Go Live</a>
+        </div>
+      </div>
+
+      {% block sidebar %}{% endblock %}
+    </aside>
+
+    <main class="content-area">
+      {% block content %}{% endblock %}
+    </main>
+  </div>
+
+  <div id="ui-toast" class="toast"></div>
+  <script src="/ui/static/ui.js"></script>
+  <script>setActiveNav("{{ request.url.path }}");</script>
+  {% block scripts %}{% endblock %}
+</body>
+</html>

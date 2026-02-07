@@ -1,0 +1,110 @@
+{% extends "ui/base.html" %}
+{% block content %}
+  <div class="panel" style="margin-bottom: 16px;">
+    <div class="panel-head"><i class="fa-solid fa-stethoscope"></i> Project Doctor</div>
+    <div class="form-row">
+      <div class="input-wrap">
+        <label>Role</label>
+        <select id="doc-role" class="dark-input">
+          <option value="all">ALL</option>
+          <option value="paper">paper</option>
+          <option value="live">live</option>
+          <option value="pump">pump</option>
+        </select>
+      </div>
+    </div>
+    <div class="inline-actions" style="margin-top: 10px;">
+      <button class="btn btn-secondary small-btn" onclick="runDoctor()">Run Checks</button>
+      <button class="btn btn-warning small-btn" onclick="clearRestart()">Clear Restart Flags</button>
+      <button class="btn btn-warning small-btn" onclick="clearCommands()">Clear Stuck Commands</button>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-head"><i class="fa-solid fa-bug"></i> Checks</div>
+    <div class="table-wrap">
+      <table class="data-table">
+        <thead><tr><th>Name</th><th>Severity</th><th>Details</th><th>Suggested Fix</th></tr></thead>
+        <tbody id="doc-body"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="panel" style="margin-top:16px;">
+    <div class="panel-head"><i class="fa-solid fa-network-wired"></i> Pipeline Status</div>
+    <div class="table-wrap">
+      <table class="data-table">
+        <thead><tr><th>Role</th><th>Dashboard</th><th>Brain Sync</th></tr></thead>
+        <tbody id="doc-pipeline"></tbody>
+      </table>
+    </div>
+  </div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+async function runDoctor() {
+  try {
+    const data = await fetchJson('/api/doctor/run', { method: 'POST' });
+    const body = document.getElementById('doc-body');
+    const items = data.checks || data.items || [];
+    body.innerHTML = items.length ? '' : '<tr><td colspan="4">No checks</td></tr>';
+    items.forEach((c) => {
+      const sev = (c.severity || 'OK').toUpperCase();
+      const badge = sev === 'CRIT' ? 'badge-crit' : sev === 'WARN' ? 'badge-warn' : 'badge-ok';
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td>${c.name || '-'}</td>
+        <td><span class="badge-soft ${badge}">${sev}</span></td>
+        <td>${c.details || '-'}</td>
+        <td>${c.suggested_fix || '-'}</td>
+      `;
+      body.appendChild(tr);
+    });
+    await loadPipeline();
+  } catch (e) {
+    showToast(e.message || 'Doctor failed', false);
+  }
+}
+
+async function clearRestart() {
+  const role = document.getElementById('doc-role').value || 'all';
+  try {
+    await fetchJson('/api/doctor/fix/clear_restart', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ role }) });
+    showToast('Restart flags cleared');
+  } catch (e) {
+    showToast(e.message || 'Clear restart failed', false);
+  }
+}
+
+async function clearCommands() {
+  const role = document.getElementById('doc-role').value || 'all';
+  try {
+    await fetchJson('/api/doctor/fix/clear_commands', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ role, age_min: 30 }) });
+    showToast('Commands cleared');
+  } catch (e) {
+    showToast(e.message || 'Clear commands failed', false);
+  }
+}
+
+async function loadPipeline() {
+  try {
+    const data = await fetchJson('/api/pipeline/status?role=all');
+    const body = document.getElementById('doc-pipeline');
+    body.innerHTML = '';
+    const roles = data.roles || {};
+    Object.keys(roles).forEach((r) => {
+      const dash = roles[r] || {};
+      const brain = (data.brain_sync || {})[r] || {};
+      const tr = document.createElement('tr');
+      tr.innerHTML = `<td>${r}</td><td>${dash.ok === false ? 'ERR' : 'OK'}</td><td>${brain.ok === false ? 'ERR' : 'OK'}</td>`;
+      body.appendChild(tr);
+    });
+  } catch (e) {
+    showToast(e.message || 'Pipeline status failed', false);
+  }
+}
+
+runDoctor();
+</script>
+{% endblock %}

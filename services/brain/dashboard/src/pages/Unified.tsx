@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import {
   Box,
   Button,
@@ -22,32 +22,7 @@ import { fetchUnifiedOverview, fetchUnifiedRoleSnapshot, approveUnifiedSignal, r
 import type { UnifiedOverview, UnifiedRole } from "../api/unified";
 import { fetchAuthStatus, loginAuth, logoutAuth } from "../api/auth";
 import type { AuthStatus } from "../api/auth";
-
-function JsonBlock({ value }: { value: any }) {
-  const text = useMemo(() => {
-    try {
-      return JSON.stringify(value, null, 2);
-    } catch {
-      return String(value);
-    }
-  }, [value]);
-
-  return (
-    <Box
-      component="pre"
-      sx={{
-        m: 0,
-        p: 2,
-        overflowX: "auto",
-        whiteSpace: "pre-wrap",
-        wordBreak: "break-word",
-        fontSize: 12,
-      }}
-    >
-      {text}
-    </Box>
-  );
-}
+import KeyValueGrid from "../components/KeyValueGrid";
 
 export default function Unified() {
   const [role, setRole] = useState<UnifiedRole>("paper");
@@ -297,7 +272,7 @@ const onForceCloseAll = async () => {
           <Typography sx={{ opacity: 0.7, mb: 1 }}>
             Quick health/metrics from Brain API
           </Typography>
-          <JsonBlock value={brain ?? { note: "No data yet" }} />
+          <KeyValueGrid data={brain ?? { note: "No data yet" }} />
         </Paper>
 
         <Paper sx={{ p: 2 }}>
@@ -320,7 +295,7 @@ const onForceCloseAll = async () => {
           <Divider sx={{ my: 2 }} />
 
           <Typography variant="subtitle1">Stats</Typography>
-          <JsonBlock value={dash?.stats ?? { note: "No stats" }} />
+          <KeyValueGrid data={dash?.stats ?? { note: "No stats" }} />
 
           <Divider sx={{ my: 2 }} />
 
@@ -444,8 +419,8 @@ const onForceCloseAll = async () => {
 
 <Divider sx={{ my: 2 }} />
 
-<Typography variant="subtitle1">Raw snapshot JSON</Typography>
-<JsonBlock value={snapshot ?? { note: "No snapshot yet" }} />
+<Typography variant="subtitle1">Snapshot summary</Typography>
+<KeyValueGrid data={snapshot?.system_health ?? snapshot} />
       </Paper>
       {toast ? (
         <Snackbar

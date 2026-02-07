@@ -20,6 +20,7 @@ import re
 from typing import List, Optional, Dict, Any
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone, timedelta
+from urllib.parse import urlparse
 
 
 from fastapi import FastAPI, WebSocket, Request, WebSocketDisconnect, Form, HTTPException
@@ -46,6 +47,7 @@ from binance.client import Client
 from fetcher import fetch_klines, fetch_klines_window, fetch_klines_range
 from indicators import ema, rsi, volume_spike, atr, adx
 from pump_detector import detect_pre_pump
+from service_registry import register_service
 
 # Optional modules
 try:
@@ -81,6 +83,9 @@ if AuditLab and not bool(getattr(cfg, "DISABLE_AUDIT_LAB", False)):
         lab = None
 
 templates = Jinja2Templates(directory=os.path.join(BASE_DIR, "templates"))
+
+
+READ_ONLY_MESSAGE = "Dashboard is read-only. Use Unified Dashboard."
 
 def _utc_iso_now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
@@ -143,6 +148,18 @@ def _safe_last(x, default: float = 0.0) -> float:
         return float(x)
     except Exception:
         return default
+
+
+def _read_only_enabled() -> bool:
+    raw = os.getenv("READ_ONLY", "1")
+    return str(raw).strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _template_ctx(request: Request, **extra: Any) -> Dict[str, Any]:
+    ctx: Dict[str, Any] = {"request": request, "read_only": _read_only_enabled()}
+    if extra:
+        ctx.update(extra)
+    return ctx
 
 
 def _normalize_side(raw) -> str | None:
@@ -249,6 +266,15 @@ async def lifespan(app: FastAPI):
         (_bootstrap.ensure_dashboard_bootstrap(db))
     except Exception as e:
         print(f"⚠️ dashboard bootstrap skipped: {e}")
+    try:
+        register_service(
+            "mina_dashboard",
+            role=str(os.getenv("BOT_ROLE") or "").strip().lower() or None,
+            schema_name=getattr(db, "pg_schema", None),
+            meta={"component": "dashboard"},
+        )
+    except Exception:
+        pass
     yield
     print("🛑 Dashboard Shutdown")
 app = FastAPI(lifespan=lifespan)
@@ -276,11 +302,29 @@ if _auth_enabled():
 
 
 # =========================================
+# 🔒 READ-ONLY MODE (legacy dashboards)
+# =========================================
+@app.middleware("http")
+async def readonly_middleware(request: Request, call_next):
+    if _read_only_enabled():
+        method = str(request.method or "").upper()
+        path = str(request.url.path or "")
+        if method not in {"GET", "HEAD", "OPTIONS"} and (
+            path.startswith("/api/") or path == "/publish" or path.startswith("/publish/")
+        ):
+            return JSONResponse(
+                status_code=403,
+                content={"status": "error", "detail": READ_ONLY_MESSAGE, "message": READ_ONLY_MESSAGE},
+            )
+    return await call_next(request)
+
+
+# =========================================
 # 🔑 LOGIN ROUTES
 # =========================================
 @app.get("/login", response_class=HTMLResponse)
 async def login_page(request: Request):
-    return templates.TemplateResponse("login.html", {"request": request})
+    return templates.TemplateResponse("login.html", _template_ctx(request))
 
 @app.post("/login")
 async def login_action(username: str = Form(...), password: str = Form(...)):
@@ -358,10 +402,101 @@ async def healthz():
         "execution_monitor_age_sec": exec_mon_age_sec,
     }
 
+@app.get("/health")
+async def health():
+    """Simple JSON health for load balancers/smoke tests."""
+    role = str(getattr(cfg, "BOT_ROLE", "") or os.getenv("BOT_ROLE") or os.getenv("SERVICE_ROLE") or "unknown").strip().lower()
+    return {"status": "ok", "service": f"mina_dashboard_{role}", "role": role}
+
 @app.get("/api/healthz")
 async def api_healthz():
     # alias for convenience
     return await healthz()
+
+
+def _normalize_dsn(dsn: str) -> str:
+    s = str(dsn or "").strip()
+    if s.startswith("postgresql+psycopg://"):
+        return "postgresql://" + s[len("postgresql+psycopg://") :]
+    if s.startswith("postgresql+psycopg2://"):
+        return "postgresql://" + s[len("postgresql+psycopg2://") :]
+    return s
+
+
+@app.get("/api/meta/datasource")
+async def datasource_meta():
+    role = str(getattr(cfg, "BOT_ROLE", "") or os.getenv("BOT_ROLE") or os.getenv("SERVICE_ROLE") or "unknown").strip().lower()
+    raw_dsn = (os.getenv("TRADING_PG_DSN") or os.getenv("MINA_PG_DSN") or "").strip()
+    dsn = _normalize_dsn(raw_dsn)
+    parsed = urlparse(dsn) if dsn else None
+    backend_raw = (os.getenv("MINA_DB_BACKEND") or os.getenv("TRADING_DB_BACKEND") or "postgres").strip().lower()
+    backend = "postgres" if backend_raw.startswith("post") else ("sqlite" if backend_raw.startswith("sqlite") else backend_raw)
+    schema = (os.getenv("MINA_PG_SCHEMA") or os.getenv("TRADING_PG_SCHEMA") or f"mina_{role}").strip()
+    return {
+        "status": "ok",
+        "service": f"mina_dashboard_{role}",
+        "role": role,
+        "backend": backend,
+        "dsn_host": (parsed.hostname if parsed else None) or "localhost",
+        "db_name": ((parsed.path or "").lstrip("/") if parsed else "") or "trading",
+        "schema": schema,
+        "version": os.getenv("BOT_VERSION") or "dev",
+    }
+
+
+@app.get("/api/pipeline/status")
+async def pipeline_status():
+    """Aggregated pipeline status for unified ops."""
+    role = str(getattr(cfg, "BOT_ROLE", "") or os.getenv("BOT_ROLE") or os.getenv("SERVICE_ROLE") or "unknown").strip().lower()
+    schema = (os.getenv("MINA_PG_SCHEMA") or os.getenv("TRADING_PG_SCHEMA") or f"mina_{role}").strip()
+
+    last_hb = None
+    exec_hb = None
+    kill_switch = None
+    kill_switch_reason = None
+    try:
+        last_hb = db.get_setting("last_heartbeat") or db.get_setting("bot_heartbeat")
+        exec_hb = db.get_setting("execution_monitor_heartbeat")
+        kill_switch = db.get_setting("kill_switch")
+        kill_switch_reason = db.get_setting("kill_switch_reason")
+    except Exception:
+        pass
+
+    trades_open = 0
+    trades_closed = 0
+    last_decision = None
+    try:
+        conn = getattr(db, "conn", None)
+        if conn is not None:
+            rows = conn.execute("SELECT status, COUNT(*) FROM trades GROUP BY status").fetchall()
+            for r in rows or []:
+                st = str(r[0] or "").upper()
+                c = int(r[1] or 0)
+                if st == "OPEN":
+                    trades_open = c
+                elif st == "CLOSED":
+                    trades_closed = c
+            try:
+                r = conn.execute("SELECT id, created_at, created_at_ms FROM decision_traces ORDER BY id DESC LIMIT 1").fetchone()
+                if r:
+                    last_decision = {"id": r[0], "created_at": r[1], "created_at_ms": r[2]}
+            except Exception:
+                last_decision = None
+    except Exception:
+        pass
+
+    return {
+        "ok": True,
+        "role": role,
+        "schema": schema,
+        "last_heartbeat": last_hb,
+        "execution_monitor_heartbeat": exec_hb,
+        "kill_switch": kill_switch,
+        "kill_switch_reason": kill_switch_reason,
+        "trades": {"open": trades_open, "closed": trades_closed},
+        "last_decision": last_decision,
+        "brain_sync_state": None,
+    }
 
 
 # =========================================
@@ -370,7 +505,7 @@ async def api_healthz():
 @app.get("/doctor", response_class=HTMLResponse)
 async def doctor_page(request: Request):
     """Project Doctor page: shows runtime health + effective settings."""
-    return templates.TemplateResponse("doctor.html", {"request": request})
+    return templates.TemplateResponse("doctor.html", _template_ctx(request))
 
 
 def _parse_iso_dt(s: str | None):
@@ -1163,7 +1298,7 @@ async def status_page(request: Request):
         data = await healthz()
     except Exception as e:
         data = {"ok": False, "error": str(e)}
-    return templates.TemplateResponse("status.html", {"request": request, "status": data})
+    return templates.TemplateResponse("status.html", _template_ctx(request, status=data))
 
 
 # =========================================
@@ -1171,24 +1306,24 @@ async def status_page(request: Request):
 # =========================================
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
-    return templates.TemplateResponse("index.html", {"request": request})
+    return templates.TemplateResponse("index.html", _template_ctx(request))
 
 @app.get("/analytics", response_class=HTMLResponse)
 async def analytics_page(request: Request):
-    return templates.TemplateResponse("analytics.html", {"request": request})
+    return templates.TemplateResponse("analytics.html", _template_ctx(request))
 
 @app.get("/audit", response_class=HTMLResponse)
 async def audit_page(request: Request):
-    return templates.TemplateResponse("audit_lab.html", {"request": request})
+    return templates.TemplateResponse("audit_lab.html", _template_ctx(request))
 
 @app.get("/paper", response_class=HTMLResponse)
 async def paper_page(request: Request):
-    return templates.TemplateResponse("paper_arena.html", {"request": request})
+    return templates.TemplateResponse("paper_arena.html", _template_ctx(request))
 
 
 @app.get("/pump", response_class=HTMLResponse)
 async def pump_page(request: Request):
-    return templates.TemplateResponse("pump_hunter.html", {"request": request})
+    return templates.TemplateResponse("pump_hunter.html", _template_ctx(request))
 
 
 # =========================================
@@ -1513,10 +1648,14 @@ async def restart_bot():
     """Request bot restart (requires running under loop/supervisor)."""
     token = str(int(time.time() * 1000))
     try:
-        db.set_setting("restart_bot_req", token, source="dashboard", bump_version=False, audit=True)
+        cmd_id = _insert_command_row("RESTART_BOT", params={"token": token}, source="dashboard")
+        return {"ok": True, "cmd_id": cmd_id, "req": token}
     except Exception:
-        pass
-    return {"ok": True, "req": token}
+        try:
+            db.set_setting("restart_bot_req", token, source="dashboard", bump_version=False, audit=True)
+        except Exception:
+            pass
+        return {"ok": True, "req": token}
 
 
 @app.post("/api/control/restart_monitor")
@@ -1524,10 +1663,14 @@ async def restart_monitor():
     """Request execution_monitor restart (requires running under loop/supervisor)."""
     token = str(int(time.time() * 1000))
     try:
-        db.set_setting("restart_monitor_req", token, source="dashboard", bump_version=False, audit=True)
+        cmd_id = _insert_command_row("RESTART_MONITOR", params={"token": token}, source="dashboard")
+        return {"ok": True, "cmd_id": cmd_id, "req": token}
     except Exception:
-        pass
-    return {"ok": True, "req": token}
+        try:
+            db.set_setting("restart_monitor_req", token, source="dashboard", bump_version=False, audit=True)
+        except Exception:
+            pass
+        return {"ok": True, "req": token}
 
 @app.post("/api/test_webhook")
 async def test_webhook(request: Request):

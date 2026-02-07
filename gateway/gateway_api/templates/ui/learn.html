@@ -1,0 +1,81 @@
+{% extends "ui/base.html" %}
+{% block content %}
+  <div class="panel" style="margin-bottom: 16px;">
+    <div class="panel-head"><i class="fa-solid fa-graduation-cap"></i> Learning Pipeline</div>
+    <div class="note">Learning uses recent trades + features to update decision thresholds. Use with caution in LIVE.</div>
+    <div class="inline-actions" style="margin-top: 10px;">
+      <button class="btn btn-secondary small-btn" onclick="loadLearn()">Refresh</button>
+      <button class="btn btn-blue small-btn" onclick="triggerLearn('sync')">Sync Now</button>
+      <button class="btn btn-blue small-btn" onclick="triggerLearn('train')">Train Now</button>
+      <button class="btn btn-blue small-btn" onclick="triggerLearn('backtest')">Backtest</button>
+    </div>
+  </div>
+
+  <div class="panel" style="margin-bottom: 16px;">
+    <div class="panel-head"><i class="fa-solid fa-database"></i> Status</div>
+    <div class="kv-grid" id="learn-status"></div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-head"><i class="fa-solid fa-sliders"></i> Config</div>
+    <div class="form-row">
+      <div class="input-wrap"><label>Learning Enabled</label>
+        <select id="learn-enabled" class="dark-input"><option value="true">TRUE</option><option value="false">FALSE</option></select>
+      </div>
+      <div class="input-wrap"><label>Min Trades</label><input id="learn-min-trades" placeholder="100" /></div>
+      <div class="input-wrap"><label>Threshold</label><input id="learn-threshold" placeholder="0.6" /></div>
+    </div>
+    <div class="inline-actions" style="margin-top:10px;">
+      <button class="btn btn-secondary small-btn" onclick="saveLearnConfig()">Save Config</button>
+    </div>
+  </div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+async function loadLearn() {
+  try {
+    const status = await fetchJson('/api/learn/status');
+    const cfg = await fetchJson('/api/learn/config');
+    const el = document.getElementById('learn-status');
+    el.innerHTML = '';
+    Object.entries(status || {}).forEach(([k,v]) => {
+      const div = document.createElement('div');
+      div.className = 'kv-item';
+      div.innerHTML = `<div class="kv-label">${k}</div><div class="kv-value">${JSON.stringify(v)}</div>`;
+      el.appendChild(div);
+    });
+    document.getElementById('learn-enabled').value = String(cfg.learning_enabled ?? true);
+    document.getElementById('learn-min-trades').value = cfg.min_trades ?? '';
+    document.getElementById('learn-threshold').value = cfg.threshold ?? '';
+  } catch (e) {
+    showToast(e.message || 'Learn status failed', false);
+  }
+}
+
+async function triggerLearn(kind) {
+  try {
+    await fetchJson(`/api/learn/${kind}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) });
+    showToast(`${kind} triggered`);
+  } catch (e) {
+    showToast(e.message || 'Learn action failed', false);
+  }
+}
+
+async function saveLearnConfig() {
+  const payload = {
+    learning_enabled: document.getElementById('learn-enabled').value === 'true',
+    min_trades: document.getElementById('learn-min-trades').value,
+    threshold: document.getElementById('learn-threshold').value,
+  };
+  try {
+    await fetchJson('/api/learn/config', { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+    showToast('Config saved');
+  } catch (e) {
+    showToast(e.message || 'Save failed', false);
+  }
+}
+
+loadLearn();
+</script>
+{% endblock %}

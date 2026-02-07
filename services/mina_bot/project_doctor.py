@@ -25,6 +25,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import urlparse
 
 try:
     import requests  # type: ignore
@@ -425,61 +426,137 @@ def collect_status(
         cfg_summary["loaded"] = False
     status["config"] = cfg_summary
 
-    db_path = resolve_db_path()
     db: Dict[str, Any] = {}
-    db.update(db_wal_state(db_path))
-
-    candidates = [
-        PROJECT_ROOT / "bot_data.db",
-        PROJECT_ROOT / "dashboard" / "bot_data.db",
-        db_path,
-    ]
-    uniq: List[Path] = []
-    for p in candidates:
-        if p not in uniq:
-            uniq.append(p)
-    db["known_db_files"] = [{"path": str(p), "exists": p.exists(), "size_bytes": p.stat().st_size if p.exists() else 0} for p in uniq]
-
+    backend_raw = str(os.getenv("MINA_DB_BACKEND") or os.getenv("TRADING_DB_BACKEND") or "postgres").strip().lower()
+    is_postgres = backend_raw.startswith("post")
+    db["backend"] = "postgres" if is_postgres else "sqlite"
     db["integrity_ok"] = None
     db["integrity_message"] = "not_checked"
 
-    if db_path.exists():
+    if is_postgres:
+        dsn = str(os.getenv("TRADING_PG_DSN") or os.getenv("MINA_PG_DSN") or "").strip()
+        role = str(os.getenv("BOT_ROLE") or "paper").strip().lower()
+        schema = str(os.getenv("TRADING_PG_SCHEMA") or os.getenv("MINA_PG_SCHEMA") or f"mina_{role}").strip()
+        parsed = urlparse(dsn.replace("postgresql+psycopg://", "postgresql://").replace("postgresql+psycopg2://", "postgresql://"))
+        db["dsn_host"] = parsed.hostname or "localhost"
+        db["db_name"] = (parsed.path or "").lstrip("/") or "trading"
+        db["schema"] = schema
+        db["exists"] = True
+        db["size_bytes"] = None
+        db["wal_exists"] = None
+        db["shm_exists"] = None
+        db["known_db_files"] = []
         try:
-            con = connect_db(db_path)
-            ensure_min_schema(con)
+            try:
+                from mina_core.db.pg_compat import connect_postgres_compat  # type: ignore
+            except Exception:
+                from pg_compat import connect_postgres_compat  # type: ignore
 
-            ok, msg = db_integrity_quick_check(con)
-            db["integrity_ok"] = ok
-            db["integrity_message"] = msg
+            con = connect_postgres_compat(dsn, schema=schema)
+            cur = con.cursor()
+
+            def _count(table: str) -> Optional[int]:
+                try:
+                    cur.execute(f"SELECT COUNT(*) FROM {table}")
+                    row = cur.fetchone()
+                    if row is None:
+                        return 0
+                    try:
+                        return int(row[0])
+                    except Exception:
+                        return int(getattr(row, "count", 0))
+                except Exception:
+                    return None
 
             db["counts"] = {
-                "logs": safe_count(con, "logs"),
-                "trades": safe_count(con, "trades"),
-                "equity_history": safe_count(con, "equity_history"),
-                "signal_inbox": safe_count(con, "signal_inbox"),
-                "commands": safe_count(con, "commands"),
-                "rejections": safe_count(con, "rejections"),
+                "logs": _count("logs"),
+                "trades": _count("trades"),
+                "equity_history": _count("equity_history"),
+                "signal_inbox": _count("signal_inbox"),
+                "commands": _count("commands"),
+                "rejections": _count("rejections"),
             }
-
-            db["last_log_time"] = safe_last_ts(con, "logs", ["timestamp", "time", "created_at"])
-            db["last_snapshot_time"] = safe_last_ts(con, "equity_history", ["timestamp", "created_at"])
-            db["last_signal_time"] = safe_last_ts(con, "signal_inbox", ["created_at", "received_at", "received_at_ms"])
-            db["last_command_time"] = safe_last_ts(con, "commands", ["created_at", "updated_at"])
-
+            db["integrity_ok"] = True
+            db["integrity_message"] = "postgres_primary"
             try:
-                rows = con.execute("SELECT key, value, updated_at FROM settings").fetchall()
+                cur.execute("SELECT key, value, updated_at FROM settings")
+                rows = cur.fetchall() or []
                 db["settings_count"] = len(rows)
                 keys = {"kill_switch", "mode", "require_dashboard_approval", "auto_approve_live", "auto_approve_paper", "paper_daily_enabled"}
-                db["settings_ops"] = {r["key"]: r["value"] for r in rows if r["key"] in keys}
+                settings_ops: Dict[str, Any] = {}
+                for r in rows:
+                    try:
+                        k = r["key"]  # type: ignore[index]
+                        v = r["value"]  # type: ignore[index]
+                    except Exception:
+                        try:
+                            k = r[0]
+                            v = r[1]
+                        except Exception:
+                            continue
+                    if str(k) in keys:
+                        settings_ops[str(k)] = v
+                db["settings_ops"] = settings_ops
             except Exception:
                 db["settings_count"] = None
                 db["settings_ops"] = {}
-
-            con.close()
+            try:
+                con.close()
+            except Exception:
+                pass
         except Exception as e:
             db["error"] = str(e)
     else:
-        db["error"] = "database file not found"
+        db_path = resolve_db_path()
+        db.update(db_wal_state(db_path))
+        candidates = [
+            PROJECT_ROOT / "bot_data.db",
+            PROJECT_ROOT / "dashboard" / "bot_data.db",
+            db_path,
+        ]
+        uniq: List[Path] = []
+        for p in candidates:
+            if p not in uniq:
+                uniq.append(p)
+        db["known_db_files"] = [{"path": str(p), "exists": p.exists(), "size_bytes": p.stat().st_size if p.exists() else 0} for p in uniq]
+
+        if db_path.exists():
+            try:
+                con = connect_db(db_path)
+                ensure_min_schema(con)
+
+                ok, msg = db_integrity_quick_check(con)
+                db["integrity_ok"] = ok
+                db["integrity_message"] = msg
+
+                db["counts"] = {
+                    "logs": safe_count(con, "logs"),
+                    "trades": safe_count(con, "trades"),
+                    "equity_history": safe_count(con, "equity_history"),
+                    "signal_inbox": safe_count(con, "signal_inbox"),
+                    "commands": safe_count(con, "commands"),
+                    "rejections": safe_count(con, "rejections"),
+                }
+
+                db["last_log_time"] = safe_last_ts(con, "logs", ["timestamp", "time", "created_at"])
+                db["last_snapshot_time"] = safe_last_ts(con, "equity_history", ["timestamp", "created_at"])
+                db["last_signal_time"] = safe_last_ts(con, "signal_inbox", ["created_at", "received_at", "received_at_ms"])
+                db["last_command_time"] = safe_last_ts(con, "commands", ["created_at", "updated_at"])
+
+                try:
+                    rows = con.execute("SELECT key, value, updated_at FROM settings").fetchall()
+                    db["settings_count"] = len(rows)
+                    keys = {"kill_switch", "mode", "require_dashboard_approval", "auto_approve_live", "auto_approve_paper", "paper_daily_enabled"}
+                    db["settings_ops"] = {r["key"]: r["value"] for r in rows if r["key"] in keys}
+                except Exception:
+                    db["settings_count"] = None
+                    db["settings_ops"] = {}
+
+                con.close()
+            except Exception as e:
+                db["error"] = str(e)
+        else:
+            db["error"] = "database file not found"
 
     status["database"] = db
     status["bot"] = infer_bot_liveness(db)
@@ -495,9 +572,12 @@ def collect_status(
         status["binance"] = {"ok": None, "message": "skipped"}
 
     problems: List[str] = []
-    if not db.get("exists"):
+    if db.get("backend") == "postgres":
+        if db.get("error"):
+            problems.append(f"Postgres unavailable: {db.get('error')}")
+    elif not db.get("exists"):
         problems.append("DB file missing")
-    if db.get("exists") and db.get("integrity_ok") is False:
+    if db.get("integrity_ok") is False:
         problems.append(f"DB integrity not ok: {db.get('integrity_message')}")
 
     dash = status.get("dashboard", {})

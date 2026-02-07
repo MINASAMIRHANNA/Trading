@@ -83,6 +83,8 @@
     .modal .panel-body { padding: 0; }
     .modal .panel-body pre.json { border-radius:0; max-height: calc(92vh - 56px); }
   </style>
+    <script>window.DASHBOARD_READ_ONLY = {{ "true" if read_only else "false" }};</script>
+    <script defer src="/static/readonly.js"></script>
 </head>
 <body>
   <div class="doctor-wrap">

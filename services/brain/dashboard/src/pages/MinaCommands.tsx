@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   Box,
   Button,
@@ -13,6 +13,8 @@ import {
   Typography,
 } from "@mui/material";
 import { type UnifiedRole, queueUnifiedCommand, queueUnifiedCloseAll, queueUnifiedKillSwitch } from "../api/unified";
+import KeyValueGrid from "../components/KeyValueGrid";
+import { requestLiveGuard } from "../utils/liveGuard";
 
 const COMMANDS = [
   "CLOSE_ALL_POSITIONS",
@@ -21,8 +23,8 @@ const COMMANDS = [
   "KILL_SWITCH_OFF",
 ];
 
-export default function MinaCommands() {
-  const [role, setRole] = useState<UnifiedRole>("paper");
+export default function MinaCommands(props: { initialRole?: UnifiedRole; lockRole?: boolean }) {
+  const [role, setRole] = useState<UnifiedRole>(props.initialRole || "paper");
   const [cmd, setCmd] = useState<string>(COMMANDS[0]);
   const [reason, setReason] = useState<string>("Manual override");
   const [loading, setLoading] = useState(false);
@@ -33,10 +35,23 @@ export default function MinaCommands() {
     severity: "success",
   });
 
+  const roleLocked = Boolean(props.lockRole);
+
+  const getLiveGuard = async (action: string) => {
+    if (role !== "live") return undefined;
+    return (await requestLiveGuard(action)) || undefined;
+  };
+
+  useEffect(() => {
+    if (props.initialRole) setRole(props.initialRole);
+  }, [props.initialRole]);
+
   const submit = async () => {
+    const guard = await getLiveGuard(`Send ${cmd}`);
+    if (role === "live" && !guard) return;
     setLoading(true);
     try {
-      const res = await queueUnifiedCommand(role, cmd, { reason, ts_utc: new Date().toISOString() });
+      const res = await queueUnifiedCommand(role, cmd, { reason, ts_utc: new Date().toISOString() }, guard);
       setLast(res);
       setSnack({ open: true, msg: `Queued ${cmd} (audit_id=${res?.audit_id ?? "?"})`, severity: "success" });
     } catch (e: any) {
@@ -47,9 +62,11 @@ export default function MinaCommands() {
   };
 
   const submitCloseAll = async () => {
+    const guard = await getLiveGuard("Close all positions");
+    if (role === "live" && !guard) return;
     setLoading(true);
     try {
-      const res = await queueUnifiedCloseAll(role, reason);
+      const res = await queueUnifiedCloseAll(role, reason, guard);
       setLast(res);
       setSnack({ open: true, msg: `Queued CLOSE_ALL (audit_id=${res?.audit_id ?? "?"})`, severity: "success" });
     } catch (e: any) {
@@ -60,9 +77,11 @@ export default function MinaCommands() {
   };
 
   const submitKillSwitch = async (enabled: boolean) => {
+    const guard = await getLiveGuard(enabled ? "Enable kill switch" : "Disable kill switch");
+    if (role === "live" && !guard) return;
     setLoading(true);
     try {
-      const res = await queueUnifiedKillSwitch(role, enabled, reason);
+      const res = await queueUnifiedKillSwitch(role, enabled, reason, guard);
       setLast(res);
       setSnack({
         open: true,
@@ -85,15 +104,23 @@ export default function MinaCommands() {
         Queue operational commands via Gateway (audited).
       </Typography>
 
+      {role === "live" ? (
+        <Alert severity="warning" sx={{ mb: 2 }}>
+          LIVE mode requires double-confirmation and may require a safety PIN.
+        </Alert>
+      ) : null}
+
       <Box sx={{ display: "flex", gap: 2, flexWrap: "wrap", alignItems: "center" }}>
-        <FormControl size="small" sx={{ minWidth: 160 }}>
-          <InputLabel>Role</InputLabel>
-          <Select label="Role" value={role} onChange={(e) => setRole(e.target.value as UnifiedRole)}>
-            <MenuItem value="paper">paper</MenuItem>
-            <MenuItem value="live">live</MenuItem>
-            <MenuItem value="pump">pump</MenuItem>
-          </Select>
-        </FormControl>
+        {!roleLocked ? (
+          <FormControl size="small" sx={{ minWidth: 160 }}>
+            <InputLabel>Role</InputLabel>
+            <Select label="Role" value={role} onChange={(e) => setRole(e.target.value as UnifiedRole)}>
+              <MenuItem value="paper">paper</MenuItem>
+              <MenuItem value="live">live</MenuItem>
+              <MenuItem value="pump">pump</MenuItem>
+            </Select>
+          </FormControl>
+        ) : null}
 
         <FormControl size="small" sx={{ minWidth: 240 }}>
           <InputLabel>Command</InputLabel>
@@ -130,9 +157,7 @@ export default function MinaCommands() {
       <Typography variant="subtitle2" sx={{ mb: 1 }}>
         Last response
       </Typography>
-      <pre style={{ background: "#0d1117", color: "#e6edf3", padding: 12, borderRadius: 8, overflowX: "auto" }}>
-        {JSON.stringify(last, null, 2)}
-      </pre>
+      <KeyValueGrid data={last} />
 
       <Snackbar open={snack.open} autoHideDuration={4000} onClose={() => setSnack((s) => ({ ...s, open: false }))}>
         <Alert severity={snack.severity} onClose={() => setSnack((s) => ({ ...s, open: false }))} sx={{ width: "100%" }}>

@@ -11,7 +11,13 @@ def generate_ai_coach(summary: dict) -> dict:
     if summary["expectancy"] < 0:
         advice.append("Negative expectancy. Avoid trading in weak or unclear market regimes.")
 
-    if "downtrend" in summary.get("worst_regime", ""):
+    worst_regime = summary.get("worst_regime", "")
+    if worst_regime is None:
+        worst_regime_text = ""
+    else:
+        worst_regime_text = str(worst_regime).lower()
+
+    if "downtrend" in worst_regime_text:
         advice.append("Most losses occurred in downtrend. Filtering downtrend trades may improve results.")
 
     if summary["trades"] > 5:

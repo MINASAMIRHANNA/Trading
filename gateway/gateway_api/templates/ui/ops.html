@@ -1,0 +1,288 @@
+{% extends "ui/base.html" %}
+{% block content %}
+  <div class="panel" style="margin-bottom: 16px;">
+    <div class="panel-head"><i class="fa-solid fa-satellite-dish"></i> Ops Live</div>
+    <div class="form-row">
+      <div class="input-wrap">
+        <label>Role</label>
+        <select id="ops-role" class="dark-input">
+          <option value="all">ALL</option>
+          <option value="paper">paper</option>
+          <option value="live" selected>live</option>
+          <option value="pump">pump</option>
+        </select>
+      </div>
+      <div class="input-wrap">
+        <label>Symbol Filter</label>
+        <input id="ops-symbol" placeholder="BTCUSDT" />
+      </div>
+      <div class="input-wrap">
+        <label>Log Level</label>
+        <select id="ops-log-level" class="dark-input">
+          <option value="">ALL</option>
+          <option value="ERROR" selected>ERROR</option>
+          <option value="WARN">WARN</option>
+          <option value="INFO">INFO</option>
+        </select>
+      </div>
+      <div class="input-wrap">
+        <label>Log Contains</label>
+        <input id="ops-log-contains" placeholder="keyword" />
+      </div>
+    </div>
+    <div class="inline-actions" style="margin-top: 10px;">
+      <button class="btn btn-secondary small-btn" onclick="refreshOps()"><i class="fa-solid fa-rotate-right"></i> Refresh</button>
+      <button class="btn btn-blue small-btn" onclick="restartTarget('bot')"><i class="fa-solid fa-robot"></i> Restart Bot</button>
+      <button class="btn btn-blue small-btn" onclick="restartTarget('monitor')"><i class="fa-solid fa-heart-pulse"></i> Restart Monitor</button>
+      <button class="btn btn-warning small-btn" onclick="toggleKill()"><i class="fa-solid fa-ban"></i> Toggle Kill Switch</button>
+      <button class="btn btn-secondary small-btn" onclick="setAutopilot('SHADOW')">Autopilot SHADOW</button>
+      <button class="btn btn-danger small-btn" onclick="setAutopilot('OFF')">Autopilot OFF</button>
+    </div>
+    <div class="note" id="ops-last-updated" style="margin-top: 8px;">Last updated: —</div>
+  </div>
+
+  <div class="panel" style="margin-bottom: 16px;">
+    <div class="panel-head"><i class="fa-solid fa-heart-pulse"></i> Live Monitor Status</div>
+    <div id="ops-status-cards" class="stats-grid-large"></div>
+  </div>
+
+  <div class="panel" style="margin-bottom: 16px;">
+    <div class="panel-head"><i class="fa-solid fa-robot"></i> Autopilot Status</div>
+    <div class="table-wrap">
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th>Role</th>
+            <th>Role Mode</th>
+            <th>Effective</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody id="ops-autopilot-body"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="panel" style="margin-bottom: 16px;">
+    <div class="panel-head"><i class="fa-solid fa-layer-group"></i> Active Positions</div>
+    <div class="table-wrap">
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th>Role</th>
+            <th>Symbol</th>
+            <th>Side</th>
+            <th>Qty</th>
+            <th>Entry</th>
+            <th>Mark</th>
+            <th>PnL</th>
+            <th>Status</th>
+          </tr>
+        </thead>
+        <tbody id="ops-positions-body"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="panel" style="margin-bottom: 16px;">
+    <div class="panel-head"><i class="fa-solid fa-terminal"></i> Live Terminal (polling)</div>
+    <div class="table-wrap">
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th>Role</th>
+            <th>Level</th>
+            <th>Source</th>
+            <th>Message</th>
+            <th>Time</th>
+          </tr>
+        </thead>
+        <tbody id="ops-logs-body"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-head"><i class="fa-solid fa-triangle-exclamation"></i> Errors Detected</div>
+    <div class="table-wrap">
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th>Role</th>
+            <th>Level</th>
+            <th>Message</th>
+            <th>Source</th>
+            <th>Time</th>
+          </tr>
+        </thead>
+        <tbody id="ops-errors-body"></tbody>
+      </table>
+    </div>
+  </div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const roleEl = document.getElementById('ops-role');
+const symbolEl = document.getElementById('ops-symbol');
+const levelEl = document.getElementById('ops-log-level');
+const containsEl = document.getElementById('ops-log-contains');
+
+async function refreshOps() {
+  const role = roleEl.value || 'all';
+  const symbolFilter = (symbolEl.value || '').toUpperCase();
+  const level = levelEl.value || '';
+  const contains = containsEl.value || '';
+
+  try {
+    const [status, positions, errors, logs, autopilot] = await Promise.all([
+      fetchJson(`/api/ops/status?role=${encodeURIComponent(role)}`),
+      fetchJson(`/api/ops/positions?role=${encodeURIComponent(role)}&limit=200`),
+      fetchJson(`/api/ops/errors?role=${encodeURIComponent(role)}&limit=100`),
+      fetchJson(`/api/ops/logs?role=${encodeURIComponent(role)}&limit=120&level=${encodeURIComponent(level)}&contains=${encodeURIComponent(contains)}`),
+      fetchJson(`/api/unified/autopilot`)
+    ]);
+
+    const cards = document.getElementById('ops-status-cards');
+    cards.innerHTML = '';
+    const roles = status.roles || {};
+    Object.keys(roles).forEach((r) => {
+      const v = roles[r] || {};
+      const el = document.createElement('div');
+      el.className = 'panel stat-card';
+      el.innerHTML = `
+        <span class="card-lbl">${r}</span>
+        <span class="card-val">${v.last_heartbeat || '—'}</span>
+        <div class="note">Kill: ${v.kill_switch ?? '—'} | Last error: ${v.last_error?.msg || '—'}</div>
+      `;
+      cards.appendChild(el);
+    });
+
+    const posBody = document.getElementById('ops-positions-body');
+    const items = (positions.items || []).filter((p) => !symbolFilter || String(p.symbol || p.pair || '').toUpperCase().includes(symbolFilter));
+    posBody.innerHTML = items.length ? '' : `<tr><td colspan="8">No positions</td></tr>`;
+    items.forEach((p) => {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td>${p.role || '-'}</td>
+        <td>${p.symbol || p.pair || '-'}</td>
+        <td>${p.side || p.position_side || '-'}</td>
+        <td>${p.qty || p.quantity || '-'}</td>
+        <td>${p.entry_price || '-'}</td>
+        <td>${p.mark_price || p.price || '-'}</td>
+        <td>${p.pnl || p.unrealized_pnl || '-'}</td>
+        <td>${p.status || '-'}</td>
+      `;
+      posBody.appendChild(tr);
+    });
+
+    const errBody = document.getElementById('ops-errors-body');
+    const errItems = errors.items || [];
+    errBody.innerHTML = errItems.length ? '' : `<tr><td colspan="5">No errors</td></tr>`;
+    errItems.forEach((e) => {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td>${e.role || '-'}</td>
+        <td>${e.level || e.lvl || 'ERROR'}</td>
+        <td>${e.message || e.msg || '-'}</td>
+        <td>${e.source || '-'}</td>
+        <td>${e.timestamp || e.time || e.created_at || '-'}</td>
+      `;
+      errBody.appendChild(tr);
+    });
+
+    const logBody = document.getElementById('ops-logs-body');
+    const logItems = logs.items || [];
+    logBody.innerHTML = logItems.length ? '' : `<tr><td colspan="5">No logs</td></tr>`;
+    logItems.forEach((e) => {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td>${e.role || '-'}</td>
+        <td>${e.level || e.lvl || '-'}</td>
+        <td>${e.source || '-'}</td>
+        <td>${e.message || e.msg || '-'}</td>
+        <td>${e.timestamp || e.time || e.created_at || '-'}</td>
+      `;
+      logBody.appendChild(tr);
+    });
+
+    const apBody = document.getElementById('ops-autopilot-body');
+    apBody.innerHTML = '';
+    const rolesAp = (autopilot && autopilot.roles) || {};
+    Object.keys(rolesAp).forEach((r) => {
+      const row = rolesAp[r] || {};
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td>${r}</td>
+        <td>${row.role_mode || '-'}</td>
+        <td>${row.effective_mode || '-'}</td>
+        <td>
+          <button class="btn btn-secondary small-btn" onclick="setRoleAutopilot('${r}')">Set Mode</button>
+        </td>
+      `;
+      apBody.appendChild(tr);
+    });
+    if (!Object.keys(rolesAp).length) {
+      apBody.innerHTML = `<tr><td colspan="4">No autopilot data</td></tr>`;
+    }
+
+    document.getElementById('ops-last-updated').textContent = `Last updated: ${new Date().toISOString()}`;
+  } catch (e) {
+    showToast(e.message || 'Failed to refresh ops', false);
+  }
+}
+
+async function restartTarget(target) {
+  const role = roleEl.value || 'all';
+  if (role === 'all') {
+    showToast('Select a specific role first.', false);
+    return;
+  }
+  try {
+    await fetchJson('/api/ops/command', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ role, target, action: 'restart', reason: 'ui_ops' }) });
+    showToast(`Restart ${target} queued`);
+  } catch (e) {
+    showToast(e.message || 'Restart failed', false);
+  }
+}
+
+async function toggleKill() {
+  const role = roleEl.value || 'all';
+  if (role === 'all') {
+    showToast('Select a specific role first.', false);
+    return;
+  }
+  try {
+    const cur = await fetchJson(`/api/unified/${role}/settings`);
+    const ks = String(cur.kill_switch || '0') === '1' ? '0' : '1';
+    await fetchJson(`/api/unified/${role}/settings`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ kill_switch: ks, kill_switch_reason: 'ui_ops' }) });
+    showToast(`Kill switch => ${ks}`);
+  } catch (e) {
+    showToast(e.message || 'Kill switch update failed', false);
+  }
+}
+
+async function setAutopilot(mode) {
+  try {
+    await fetchJson('/api/unified/autopilot', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ global_mode: mode }) });
+    showToast(`Autopilot set to ${mode}`);
+  } catch (e) {
+    showToast(e.message || 'Autopilot update failed', false);
+  }
+}
+
+async function setRoleAutopilot(role) {
+  const mode = window.prompt('Role mode (OFF/SHADOW/TESTNET/LIVE):', 'OFF');
+  if (!mode) return;
+  try {
+    await fetchJson(`/api/unified/autopilot/${role}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ role_mode: mode }) });
+    showToast(`Autopilot ${role} => ${mode}`);
+  } catch (e) {
+    showToast(e.message || 'Role autopilot update failed', false);
+  }
+}
+
+refreshOps();
+setInterval(refreshOps, 2000);
+</script>
+{% endblock %}

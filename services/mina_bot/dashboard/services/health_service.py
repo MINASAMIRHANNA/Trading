@@ -109,6 +109,12 @@ def build_system_health_payload(
         except Exception:
             execmon_last_seen_seconds = 999999
 
+    # If bot heartbeat is missing but execution_monitor is alive, treat the role as online.
+    if not is_online and execmon_last_seen_seconds < 60:
+        is_online = True
+        if last_seen_seconds == 999999 or execmon_last_seen_seconds < last_seen_seconds:
+            last_seen_seconds = execmon_last_seen_seconds
+
     return {
         "backend": ("postgres" if getattr(db, "is_postgres", False) else "sqlite"),
         "pg_schema": getattr(db, "pg_schema", None),

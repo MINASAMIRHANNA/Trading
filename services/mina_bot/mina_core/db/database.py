@@ -31,6 +31,24 @@ try:
 except Exception:
     pass
 
+_EXPECTED_TRADING_PG_DSN = str(
+    os.getenv("EXPECTED_TRADING_PG_DSN")
+    or "postgresql://trading:trading@postgres:5432/trading"
+).strip()
+_ALLOWED_ROLE_SCHEMAS = {"mina_paper", "mina_live", "mina_pump", "brain"}
+_ROLE_SCHEMA_MAP = {"paper": "mina_paper", "live": "mina_live", "pump": "mina_pump"}
+
+
+def _normalize_dsn_contract(dsn: str) -> str:
+    s = str(dsn or "").strip()
+    if s.startswith("postgres://"):
+        s = "postgresql://" + s[len("postgres://") :]
+    if s.startswith("postgresql+psycopg://"):
+        s = "postgresql://" + s[len("postgresql+psycopg://") :]
+    if s.startswith("postgresql+psycopg2://"):
+        s = "postgresql://" + s[len("postgresql+psycopg2://") :]
+    return s
+
 
 class DatabaseManager:
     def __init__(self, db_file=None):
@@ -130,7 +148,9 @@ class DatabaseManager:
         # And provide (optional; defaults work for local socket auth):
         #   MINA_PG_DSN=postgresql:///trading
         #   MINA_PG_SCHEMA=mina_live|mina_paper|mina_pump
-        backend = (os.getenv("MINA_DB_BACKEND") or os.getenv("TRADING_DB_BACKEND") or "sqlite").strip().lower()
+        allow_sqlite_dev = str(os.getenv("ALLOW_SQLITE_DEV") or "0").strip().lower() in ("1", "true", "yes", "on")
+        backend_default = "sqlite" if allow_sqlite_dev else "postgres"
+        backend = (os.getenv("MINA_DB_BACKEND") or os.getenv("TRADING_DB_BACKEND") or backend_default).strip().lower()
         self.is_postgres = backend.startswith("post")
         self.pg_dsn = None
         self.pg_schema = None
@@ -139,14 +159,46 @@ class DatabaseManager:
             if not connect_postgres_compat:
                 raise RuntimeError("Postgres backend requested but pg_compat is unavailable (missing psycopg?).")
             bot_role = os.getenv("BOT_ROLE") or os.getenv("SERVICE_ROLE") or "unknown"
-            self.pg_dsn = (os.getenv("MINA_PG_DSN") or os.getenv("TRADING_PG_DSN") or "postgresql:///trading").strip()
+            trading_dsn_raw = str(os.getenv("TRADING_PG_DSN") or "").strip()
+            if not trading_dsn_raw:
+                raise RuntimeError(
+                    "TRADING_PG_DSN is required for Mina services startup "
+                    "(single-DB mode enforced)."
+                )
+            self.pg_dsn = _normalize_dsn_contract(trading_dsn_raw)
+            expected_dsn = _normalize_dsn_contract(_EXPECTED_TRADING_PG_DSN)
+            if self.pg_dsn != expected_dsn:
+                raise RuntimeError(
+                    f"TRADING_PG_DSN mismatch. expected={expected_dsn!r} got={self.pg_dsn!r}"
+                )
+            mina_dsn_raw = str(os.getenv("MINA_PG_DSN") or "").strip()
+            if mina_dsn_raw:
+                mina_norm = _normalize_dsn_contract(mina_dsn_raw)
+                if mina_norm != self.pg_dsn:
+                    raise RuntimeError(
+                        f"MINA_PG_DSN mismatch. expected={self.pg_dsn!r} got={mina_norm!r}"
+                    )
+
             self.pg_schema = (os.getenv("MINA_PG_SCHEMA") or os.getenv("TRADING_PG_SCHEMA") or f"mina_{bot_role}").strip()
+            if self.pg_schema not in _ALLOWED_ROLE_SCHEMAS:
+                raise RuntimeError(
+                    f"Invalid schema {self.pg_schema!r}. Allowed={sorted(_ALLOWED_ROLE_SCHEMAS)}"
+                )
+            expected_role_schema = _ROLE_SCHEMA_MAP.get(str(bot_role).strip().lower())
+            if expected_role_schema and self.pg_schema != expected_role_schema:
+                raise RuntimeError(
+                    f"Schema/role mismatch. role={bot_role!r} requires schema={expected_role_schema!r}, got={self.pg_schema!r}"
+                )
             self.conn = connect_postgres_compat(self.pg_dsn, schema=self.pg_schema)
             self.cursor = self.conn.cursor()
             # Keep a readable identifier (dashboard health uses this)
             self.db_file = f"postgres:{self.pg_schema}"  # type: ignore
             print(f"✅ [DB] Postgres PRIMARY enabled: dsn={self.pg_dsn} schema={self.pg_schema}")
         else:
+            if not allow_sqlite_dev:
+                raise RuntimeError(
+                    "SQLite backend is disabled. Set MINA_DB_BACKEND=postgres (recommended) or ALLOW_SQLITE_DEV=1 for local-only development."
+                )
             # check_same_thread=False ضروري لعمل الـ Threads
             self.conn = sqlite3.connect(self.db_file, check_same_thread=False)
             self.conn.row_factory = sqlite3.Row
@@ -197,6 +249,38 @@ class DatabaseManager:
 
     def _ms_now(self):
         return int(time.time() * 1000)
+
+    def _is_connection_lost_error(self, err: Exception) -> bool:
+        msg = str(err or "").strip().lower()
+        return any(
+            k in msg
+            for k in (
+                "connection is lost",
+                "connection already closed",
+                "connection closed",
+                "server closed the connection",
+                "closed the connection unexpectedly",
+                "terminating connection",
+            )
+        )
+
+    def _reconnect_postgres(self) -> bool:
+        if not getattr(self, "is_postgres", False):
+            return False
+        if not connect_postgres_compat:
+            return False
+        try:
+            try:
+                self.conn.close()
+            except Exception:
+                pass
+            self.conn = connect_postgres_compat(self.pg_dsn, schema=self.pg_schema)
+            self.cursor = self.conn.cursor()
+            print(f"♻️ [DB] Reconnected Postgres PRIMARY: schema={self.pg_schema}")
+            return True
+        except Exception as e:
+            print(f"❌ [DB] Reconnect failed: {e}")
+            return False
 
     
 
@@ -1264,13 +1348,24 @@ class DatabaseManager:
     # SETTINGS
     # ==========================================================
     def get_setting(self, key, default=None):
-        try:
-            with self.lock:
-                self.cursor.execute("SELECT value FROM settings WHERE key=?", (key,))
-                row = self.cursor.fetchone()
-                return row["value"] if row else default
-        except Exception:
-            return default
+        for attempt in range(2):
+            try:
+                with self.lock:
+                    # Fresh cursor reduces failures after transient cursor invalidation.
+                    self.cursor = self.conn.cursor()
+                    self.cursor.execute("SELECT value FROM settings WHERE key=?", (key,))
+                    row = self.cursor.fetchone()
+                    return row["value"] if row else default
+            except Exception as e:
+                if (
+                    attempt == 0
+                    and getattr(self, "is_postgres", False)
+                    and self._is_connection_lost_error(e)
+                    and self._reconnect_postgres()
+                ):
+                    continue
+                return default
+        return default
 
     # ==========================================================
     # DYNAMIC THRESHOLD ADJUSTMENT (Learning/Calibration)
@@ -1530,104 +1625,114 @@ class DatabaseManager:
 
     def set_setting(self, key, value, source="system", bump_version=True, audit=True, sync_mode=True):
         """Set a setting with optional audit + version bump."""
-        try:
-            now = self._utc_iso()
-            new_val = str(value)
+        for attempt in range(2):
+            try:
+                now = self._utc_iso()
+                new_val = str(value)
 
-            with self.lock:
-                cols = self._table_columns("settings")
+                with self.lock:
+                    # Fresh cursor reduces failures after transient cursor invalidation.
+                    self.cursor = self.conn.cursor()
+                    cols = self._table_columns("settings")
 
-                # Read old value (works for both schemas)
-                try:
-                    self.cursor.execute("SELECT value FROM settings WHERE key=?", (key,))
-                    row = self.cursor.fetchone()
-                    old_val = row["value"] if row else None
-                except Exception:
-                    old_val = None
-
-                # Prefer richer schema if available; fallback to legacy (key,value)
-                if "updated_at" in cols or "version" in cols or "source" in cols:
-                    # Ensure add-only migrations are applied
+                    # Read old value (works for both schemas)
                     try:
-                        if "updated_at" not in cols:
-                            self._add_column("settings", "updated_at TEXT")
-                        if "version" not in cols:
-                            self._add_column("settings", "version INTEGER DEFAULT 0")
-                        if "source" not in cols:
-                            self._add_column("settings", "source TEXT")
+                        self.cursor.execute("SELECT value FROM settings WHERE key=?", (key,))
+                        row = self.cursor.fetchone()
+                        old_val = row["value"] if row else None
                     except Exception:
-                        pass
+                        old_val = None
 
-                    cols2 = self._table_columns("settings")
-                    if "version" in cols2:
-                        # Upsert with version increment (per-setting)
-                        self.cursor.execute(
-                            """
-                            INSERT INTO settings(key,value,updated_at,version,source)
-                            VALUES(?,?,?,?,?)
-                            ON CONFLICT(key) DO UPDATE SET
-                                value=excluded.value,
-                                updated_at=excluded.updated_at,
-                                version=COALESCE(settings.version,0)+1,
-                                source=excluded.source
-                            """,
-                            (key, new_val, now, 0, source),
-                        )
-                    else:
-                        # No version column (rare): update value + metadata only
-                        if "updated_at" in cols2 and "source" in cols2:
+                    # Prefer richer schema if available; fallback to legacy (key,value)
+                    if "updated_at" in cols or "version" in cols or "source" in cols:
+                        # Ensure add-only migrations are applied
+                        try:
+                            if "updated_at" not in cols:
+                                self._add_column("settings", "updated_at TEXT")
+                            if "version" not in cols:
+                                self._add_column("settings", "version INTEGER DEFAULT 0")
+                            if "source" not in cols:
+                                self._add_column("settings", "source TEXT")
+                        except Exception:
+                            pass
+
+                        cols2 = self._table_columns("settings")
+                        if "version" in cols2:
+                            # Upsert with version increment (per-setting)
                             self.cursor.execute(
                                 """
-                                INSERT INTO settings(key,value,updated_at,source)
-                                VALUES(?,?,?,?)
+                                INSERT INTO settings(key,value,updated_at,version,source)
+                                VALUES(?,?,?,?,?)
                                 ON CONFLICT(key) DO UPDATE SET
                                     value=excluded.value,
                                     updated_at=excluded.updated_at,
+                                    version=COALESCE(settings.version,0)+1,
                                     source=excluded.source
                                 """,
-                                (key, new_val, now, source),
+                                (key, new_val, now, 0, source),
                             )
                         else:
-                            self.cursor.execute(
-                                "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
-                                (key, new_val),
-                            )
-                else:
-                    # Legacy schema
-                    self.cursor.execute(
-                        "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
-                        (key, new_val)
-                    )
+                            # No version column (rare): update value + metadata only
+                            if "updated_at" in cols2 and "source" in cols2:
+                                self.cursor.execute(
+                                    """
+                                    INSERT INTO settings(key,value,updated_at,source)
+                                    VALUES(?,?,?,?)
+                                    ON CONFLICT(key) DO UPDATE SET
+                                        value=excluded.value,
+                                        updated_at=excluded.updated_at,
+                                        source=excluded.source
+                                    """,
+                                    (key, new_val, now, source),
+                                )
+                            else:
+                                self.cursor.execute(
+                                    "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
+                                    (key, new_val),
+                                )
+                    else:
+                        # Legacy schema
+                        self.cursor.execute(
+                            "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
+                            (key, new_val)
+                        )
 
-                if audit and (old_val != new_val):
-                    self.cursor.execute(
-                        "INSERT INTO settings_audit (key, old_value, new_value, source, created_at) VALUES (?, ?, ?, ?, ?)",
-                        (key, old_val, new_val, source, now)
-                    )
+                    if audit and (old_val != new_val):
+                        self.cursor.execute(
+                            "INSERT INTO settings_audit (key, old_value, new_value, source, created_at) VALUES (?, ?, ?, ?, ?)",
+                            (key, old_val, new_val, source, now)
+                        )
 
-                self.conn.commit()
+                    self.conn.commit()
 
-            # Sprint 9: when mode changes, sync legacy keys to prevent conflicts
-            if sync_mode and (str(key).strip().upper() in ("MODE", "RUN_MODE", "MODE_SETTING") or str(key).strip().lower() == "mode") :
-                try:
-                    self.sync_legacy_mode_keys(new_val, source=source)
-                except Exception:
-                    pass
-            if bump_version and key != "__settings_version__":
-                self.bump_settings_version(source=source)
+                # Sprint 9: when mode changes, sync legacy keys to prevent conflicts
+                if sync_mode and (str(key).strip().upper() in ("MODE", "RUN_MODE", "MODE_SETTING") or str(key).strip().lower() == "mode"):
+                    try:
+                        self.sync_legacy_mode_keys(new_val, source=source)
+                    except Exception:
+                        pass
+                if bump_version and key != "__settings_version__":
+                    self.bump_settings_version(source=source)
 
-            # Optional unified Postgres mirror (best-effort)
-            if self._pg:
-                try:
-                    self._pg.upsert_setting(str(key), None if new_val is None else str(new_val))
-                except Exception:
-                    pass
+                # Optional unified Postgres mirror (best-effort)
+                if self._pg:
+                    try:
+                        self._pg.upsert_setting(str(key), None if new_val is None else str(new_val))
+                    except Exception:
+                        pass
 
-            return True
-
-        except Exception as e:
-            print(f"❌ DB Set Setting Error: {e}")
-            return False
+                return True
+            except Exception as e:
+                if (
+                    attempt == 0
+                    and getattr(self, "is_postgres", False)
+                    and self._is_connection_lost_error(e)
+                    and self._reconnect_postgres()
+                ):
+                    continue
+                print(f"❌ DB Set Setting Error: {e}")
+                return False
+        return False
 
 
     # ==========================================================

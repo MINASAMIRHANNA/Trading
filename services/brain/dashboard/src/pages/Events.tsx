@@ -22,6 +22,18 @@ function typeChip(t: string) {
   return <Chip size="small" label={label} variant="outlined" />;
 }
 
+function summary(data: any) {
+  if (!data || typeof data !== "object") return String(data ?? "");
+  const trace = data.trace_id || data.traceId;
+  const action = data.action || data.event || data.type;
+  const msg = data.message || data.msg || data.reason || "";
+  const parts = [];
+  if (action) parts.push(`action=${action}`);
+  if (trace) parts.push(`trace=${trace}`);
+  if (msg) parts.push(`msg=${String(msg).slice(0, 120)}`);
+  return parts.join(" · ") || "—";
+}
+
 export default function Events() {
   const [loading, setLoading] = useState(false);
   const [items, setItems] = useState<SharedEvent[]>([]);
@@ -244,7 +256,7 @@ export default function Events() {
               <TableCell>{it.bot_role}</TableCell>
               <TableCell>{typeChip(it.event_type)}</TableCell>
               <TableCell sx={{ maxWidth: 680, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                {JSON.stringify(it.data)}
+                {summary(it.data)}
               </TableCell>
             </TableRow>
           ))}

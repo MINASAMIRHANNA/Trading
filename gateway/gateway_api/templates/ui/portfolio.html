@@ -1,0 +1,221 @@
+{% extends "ui/base.html" %}
+{% block content %}
+  <div class="panel" style="margin-bottom: 16px;">
+    <div class="panel-head"><i class="fa-solid fa-wallet"></i> Portfolio</div>
+    <div class="form-row">
+      <div class="input-wrap">
+        <label>Role</label>
+        <select id="pf-role" class="dark-input">
+          <option value="all">ALL</option>
+          <option value="paper">paper</option>
+          <option value="live">live</option>
+          <option value="pump">pump</option>
+        </select>
+      </div>
+      <div class="input-wrap">
+        <label>From (UTC)</label>
+        <input id="pf-from" placeholder="2025-01-01" />
+      </div>
+      <div class="input-wrap">
+        <label>To (UTC)</label>
+        <input id="pf-to" placeholder="2025-12-31" />
+      </div>
+    </div>
+    <div class="inline-actions" style="margin-top: 10px;">
+      <button class="btn btn-secondary small-btn" onclick="refreshPortfolio()">Refresh</button>
+      <button class="btn btn-secondary small-btn" onclick="exportTrades('csv')">Export Trades CSV</button>
+      <button class="btn btn-secondary small-btn" onclick="exportEquity('csv')">Export Equity CSV</button>
+    </div>
+  </div>
+
+  <div class="panel" style="margin-bottom: 16px;">
+    <div class="panel-head"><i class="fa-solid fa-plug"></i> Binance Integration</div>
+    <div class="form-row">
+      <div class="input-wrap"><label>API Key</label><input id="bx-key" placeholder="api_key" /></div>
+      <div class="input-wrap"><label>API Secret</label><input id="bx-secret" placeholder="api_secret" /></div>
+      <div class="input-wrap"><label>Testnet</label>
+        <select id="bx-testnet" class="dark-input"><option value="false">FALSE</option><option value="true">TRUE</option></select>
+      </div>
+    </div>
+    <div class="inline-actions" style="margin-top: 10px;">
+      <button class="btn btn-secondary small-btn" onclick="binanceConnect()">Connect</button>
+      <button class="btn btn-secondary small-btn" onclick="binanceTest()">Test</button>
+      <button class="btn btn-danger small-btn" onclick="binanceDisconnect()">Disconnect</button>
+    </div>
+    <div class="note" id="bx-status" style="margin-top: 6px;">Status: —</div>
+  </div>
+
+  <div class="panel" style="margin-bottom: 16px;">
+    <div class="panel-head"><i class="fa-solid fa-chart-line"></i> KPIs</div>
+    <div class="stats-grid-large" id="pf-kpi"></div>
+  </div>
+
+  <div class="panel" style="margin-bottom: 16px;">
+    <div class="panel-head"><i class="fa-solid fa-table"></i> Trades</div>
+    <div class="table-wrap">
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th>ID</th>
+            <th>Role</th>
+            <th>Symbol</th>
+            <th>Status</th>
+            <th>PNL</th>
+            <th>Closed</th>
+          </tr>
+        </thead>
+        <tbody id="pf-trades"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-head"><i class="fa-solid fa-layer-group"></i> Symbol Exposure</div>
+    <div class="table-wrap">
+      <table class="data-table">
+        <thead><tr><th>Symbol</th><th>PNL</th></tr></thead>
+        <tbody id="pf-symbols"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="panel" style="margin-top: 16px;">
+    <div class="panel-head"><i class="fa-solid fa-wave-square"></i> Equity History (last 30)</div>
+    <div class="table-wrap">
+      <table class="data-table">
+        <thead><tr><th>Time</th><th>Equity</th><th>Balance</th><th>PnL</th></tr></thead>
+        <tbody id="pf-equity"></tbody>
+      </table>
+    </div>
+  </div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+async function refreshPortfolio() {
+  const role = document.getElementById('pf-role').value || 'all';
+  const from = document.getElementById('pf-from').value || '';
+  const to = document.getElementById('pf-to').value || '';
+
+  try {
+    const summary = await fetchJson(`/api/portfolio/summary?role=${encodeURIComponent(role)}&from_ts=${encodeURIComponent(from)}&to_ts=${encodeURIComponent(to)}`);
+    const trades = await fetchJson(`/api/portfolio/trades?role=${encodeURIComponent(role)}&from_ts=${encodeURIComponent(from)}&to_ts=${encodeURIComponent(to)}&limit=200`);
+
+    const kpi = summary.summary || {};
+    const kpiEl = document.getElementById('pf-kpi');
+    kpiEl.innerHTML = '';
+    const cards = [
+      { label: 'Realized PnL', value: fmtMoney(kpi.realized_pnl) },
+      { label: 'Win Rate', value: (kpi.win_rate ?? 0) + '%' },
+      { label: 'Total Trades', value: kpi.total_trades ?? 0 },
+      { label: 'Total Fees', value: fmtMoney(kpi.total_fees ?? 0) },
+    ];
+    cards.forEach((c) => {
+      const div = document.createElement('div');
+      div.className = 'panel stat-card';
+      div.innerHTML = `<span class="card-lbl">${c.label}</span><span class="card-val">${c.value}</span>`;
+      kpiEl.appendChild(div);
+    });
+
+    const tb = document.getElementById('pf-trades');
+    const items = trades.items || [];
+    tb.innerHTML = items.length ? '' : '<tr><td colspan="6">No trades</td></tr>';
+    items.forEach((t) => {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td>${t.id ?? '-'}</td>
+        <td>${t.role ?? '-'}</td>
+        <td>${t.symbol ?? t.pair ?? '-'}</td>
+        <td>${t.status ?? '-'}</td>
+        <td>${t.pnl ?? '-'}</td>
+        <td>${t.closed_at_ms ?? t.closed_at ?? t.updated_at ?? '-'}</td>
+      `;
+      tb.appendChild(tr);
+    });
+
+    const symBody = document.getElementById('pf-symbols');
+    const symbols = kpi.symbols || {};
+    const keys = Object.keys(symbols);
+    symBody.innerHTML = keys.length ? '' : '<tr><td colspan="2">No symbols</td></tr>';
+    keys.forEach((sym) => {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `<td>${sym}</td><td>${fmtMoney(symbols[sym])}</td>`;
+      symBody.appendChild(tr);
+    });
+
+    const eqBody = document.getElementById('pf-equity');
+    eqBody.innerHTML = '<tr><td colspan="4">Loading…</td></tr>';
+    if (role === 'all') {
+      eqBody.innerHTML = '<tr><td colspan="4">Select a role to view equity history.</td></tr>';
+    } else {
+      try {
+        const eq = await fetchJson(`/api/unified/${role}/equity_history?limit=30`);
+        const itemsEq = eq.items || eq || [];
+        eqBody.innerHTML = itemsEq.length ? '' : '<tr><td colspan="4">No equity history</td></tr>';
+        itemsEq.forEach((row) => {
+          const tr = document.createElement('tr');
+          tr.innerHTML = `<td>${row.ts || row.timestamp || row.created_at || '-'}</td><td>${row.equity ?? row.total ?? '-'}</td><td>${row.balance ?? '-'}</td><td>${row.pnl ?? '-'}</td>`;
+          eqBody.appendChild(tr);
+        });
+      } catch (e) {
+        eqBody.innerHTML = '<tr><td colspan="4">Equity history not available.</td></tr>';
+      }
+    }
+  } catch (e) {
+    showToast(e.message || 'Failed to load portfolio', false);
+  }
+}
+
+async function binanceConnect() {
+  const api_key = document.getElementById('bx-key').value;
+  const api_secret = document.getElementById('bx-secret').value;
+  const testnet = document.getElementById('bx-testnet').value === 'true';
+  if (!api_key || !api_secret) return showToast('API key/secret required', false);
+  try {
+    await fetchJson('/api/integrations/binance/connect', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ api_key, api_secret, testnet }) });
+    document.getElementById('bx-status').textContent = 'Status: connected';
+    showToast('Binance connected');
+  } catch (e) {
+    showToast(e.message || 'Connect failed', false);
+  }
+}
+
+async function binanceTest() {
+  try {
+    const res = await fetchJson('/api/integrations/binance/test', { method: 'POST' });
+    document.getElementById('bx-status').textContent = `Status: ${res.ok ? 'ok' : 'fail'}`;
+    showToast('Test complete', res.ok);
+  } catch (e) {
+    showToast(e.message || 'Test failed', false);
+  }
+}
+
+async function binanceDisconnect() {
+  try {
+    await fetchJson('/api/integrations/binance/disconnect', { method: 'POST' });
+    document.getElementById('bx-status').textContent = 'Status: disconnected';
+    showToast('Disconnected');
+  } catch (e) {
+    showToast(e.message || 'Disconnect failed', false);
+  }
+}
+
+function exportTrades(fmt) {
+  const role = document.getElementById('pf-role').value || 'all';
+  const from = document.getElementById('pf-from').value || '';
+  const to = document.getElementById('pf-to').value || '';
+  const url = `/api/reports/export?type=trades&format=${fmt}&role=${encodeURIComponent(role)}&from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`;
+  window.open(url, '_blank');
+}
+
+function exportEquity(fmt) {
+  const role = document.getElementById('pf-role').value || 'all';
+  const from = document.getElementById('pf-from').value || '';
+  const to = document.getElementById('pf-to').value || '';
+  const url = `/api/reports/export?type=equity&format=${fmt}&role=${encodeURIComponent(role)}&from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`;
+  window.open(url, '_blank');
+}
+
+refreshPortfolio();
+</script>
+{% endblock %}

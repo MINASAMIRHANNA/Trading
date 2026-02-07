@@ -30,6 +30,8 @@
     .bad{ color: var(--bad); }
     .warn{ color: var(--warn); }
   </style>
+    <script>window.DASHBOARD_READ_ONLY = {{ "true" if read_only else "false" }};</script>
+    <script defer src="/static/readonly.js"></script>
 </head>
 <body>
 <div class="container">
