@@ -3,22 +3,22 @@ import { api } from "./client";
 export type PumpCandidateStatus = "PENDING" | "WATCH" | "APPROVED" | "REJECTED" | "EXECUTED";
 
 export async function getPumpStatus(): Promise<any> {
-  const { data } = await api.get("/mina/pump/pump/status");
+  const { data } = await api.get("/pump/status");
   return data;
 }
 
 export async function listPumpCandidates(params: { limit?: number; status?: string } = {}): Promise<any> {
-  const { data } = await api.get("/mina/pump/pump/candidates", { params });
+  const { data } = await api.get("/pump/candidates", { params });
   return data;
 }
 
 export async function approvePumpCandidate(payload: { id: number; note?: string }): Promise<any> {
-  const { data } = await api.post("/mina/pump/pump/candidates/approve", payload);
+  const { data } = await api.post("/pump/candidates/approve", payload);
   return data;
 }
 
 export async function rejectPumpCandidate(payload: { id: number; note?: string }): Promise<any> {
-  const { data } = await api.post("/mina/pump/pump/candidates/reject", payload);
+  const { data } = await api.post("/pump/candidates/reject", payload);
   return data;
 }
 
@@ -36,16 +36,16 @@ export async function promotePumpCandidate(payload: {
 }
 
 export async function setPumpLabel(payload: { symbol: string; timestamp_ms: number; label: string; note?: string }): Promise<any> {
-  const { data } = await api.post("/mina/pump/pump/label", payload);
+  const { data } = await api.post("/pump/label", payload);
   return data;
 }
 
 export async function getPumpStats(): Promise<any> {
-  const { data } = await api.get("/mina/pump/stats");
+  const { data } = await api.get("/pump/stats");
   return data;
 }
 
 export async function listPumpTrades(params: { limit?: number; status?: string } = {}): Promise<any> {
-  const { data } = await api.get("/mina/pump/trades", { params });
+  const { data } = await api.get("/pump/trades", { params });
   return data;
 }

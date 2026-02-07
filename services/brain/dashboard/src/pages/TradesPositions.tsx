@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import {
+  Alert,
   Box,
   Button,
   Dialog,
@@ -28,23 +29,34 @@ export default function TradesPositions() {
   const [trades, setTrades] = useState<any[]>([]);
   const [tradeStatus, setTradeStatus] = useState<string>("all");
   const [tradeLimit, setTradeLimit] = useState<string>("50");
+  const [apiError, setApiError] = useState<string | null>(null);
 
   const [detailOpen, setDetailOpen] = useState(false);
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailError, setDetailError] = useState<string | null>(null);
   const [detailData, setDetailData] = useState<any>(null);
 
+  const normalizedLimit = useMemo(() => {
+    const n = Number.parseInt(String(tradeLimit || "").trim(), 10);
+    if (!Number.isFinite(n) || n <= 0) return 50;
+    return Math.min(n, 500);
+  }, [tradeLimit]);
+
   const reload = async () => {
     setLoading(true);
+    setApiError(null);
     try {
       const [pos, tradeRes] = await Promise.all([
         fetchUnifiedPositions(role),
-        fetchUnifiedTrades(role, parseInt(tradeLimit || "50", 10), tradeStatus),
+        fetchUnifiedTrades(role, normalizedLimit, tradeStatus),
       ]);
-      const arr = Array.isArray(pos) ? pos : pos?.positions || [];
+      const arr = Array.isArray(pos) ? pos : pos?.items || pos?.positions || [];
       setPositions(Array.isArray(arr) ? arr : []);
       const titems = (tradeRes && (tradeRes.items || tradeRes)) || [];
       setTrades(Array.isArray(titems) ? titems : []);
+    } catch (e: any) {
+      const detail = e?.response?.data?.detail;
+      setApiError(detail ? String(detail) : String(e?.message || e || "API unreachable"));
     } finally {
       setLoading(false);
     }
@@ -89,7 +101,7 @@ export default function TradesPositions() {
       <Box sx={{ display: "flex", gap: 2, flexWrap: "wrap", alignItems: "center" }}>
         <FormControl size="small" sx={{ minWidth: 160 }}>
           <InputLabel>Role</InputLabel>
-          <Select label="Role" value={role} onChange={(e) => setRole(e.target.value as UnifiedRole)}>
+          <Select data-testid="trades-role" label="Role" value={role} onChange={(e) => setRole(e.target.value as UnifiedRole)}>
             <MenuItem value="paper">paper</MenuItem>
             <MenuItem value="live">live</MenuItem>
             <MenuItem value="pump">pump</MenuItem>
@@ -98,7 +110,7 @@ export default function TradesPositions() {
 
         <FormControl size="small" sx={{ minWidth: 160 }}>
           <InputLabel>Status</InputLabel>
-          <Select label="Status" value={tradeStatus} onChange={(e) => setTradeStatus(String(e.target.value))}>
+          <Select data-testid="trades-status" label="Status" value={tradeStatus} onChange={(e) => setTradeStatus(String(e.target.value))}>
             <MenuItem value="all">all</MenuItem>
             <MenuItem value="open">OPEN</MenuItem>
             <MenuItem value="closed">CLOSED</MenuItem>
@@ -106,6 +118,7 @@ export default function TradesPositions() {
         </FormControl>
 
         <TextField
+          inputProps={{ "data-testid": "trades-limit" }}
           size="small"
           label="Limit"
           value={tradeLimit}
@@ -113,12 +126,17 @@ export default function TradesPositions() {
           sx={{ width: 120 }}
         />
 
-        <Button variant="contained" onClick={() => void reload()} disabled={loading}>
+        <Button data-testid="trades-refresh" variant="contained" onClick={() => void reload()} disabled={loading}>
           Refresh
         </Button>
       </Box>
 
       <Divider sx={{ my: 2 }} />
+      {apiError && (
+        <Alert severity="error" sx={{ mb: 2 }} data-testid="trades-api-error">
+          API unreachable: {apiError}
+        </Alert>
+      )}
 
       <Typography variant="h6" sx={{ mb: 1 }}>
         Positions
@@ -150,7 +168,7 @@ export default function TradesPositions() {
           {positions.length === 0 && (
             <TableRow>
               <TableCell colSpan={7} sx={{ opacity: 0.8 }}>
-                {loading ? "Loading..." : "No positions."}
+                {loading ? "Loading..." : apiError ? "API unreachable." : "No positions."}
               </TableCell>
             </TableRow>
           )}
@@ -179,14 +197,16 @@ export default function TradesPositions() {
             const tid = t?.id ?? t?.trade_id ?? idx;
             return (
               <TableRow key={tid}>
-                <TableCell>{t?.id ?? t?.trade_id ?? "-"}</TableCell>
+                <TableCell>
+                  <span data-testid={`trade-id-${t?.id ?? t?.trade_id ?? "unknown"}`}>{t?.id ?? t?.trade_id ?? "-"}</span>
+                </TableCell>
                 <TableCell>{t?.symbol ?? t?.pair ?? "-"}</TableCell>
                 <TableCell>{t?.status ?? "-"}</TableCell>
                 <TableCell>{t?.side ?? t?.signal ?? "-"}</TableCell>
                 <TableCell>{t?.pnl ?? "-"}</TableCell>
                 <TableCell>{t?.closed_at_ms ?? t?.closed_at ?? t?.updated_at ?? t?.timestamp ?? "-"}</TableCell>
                 <TableCell align="right">
-                  <Button size="small" onClick={() => void openTrade(t)}>
+                  <Button data-testid={`trade-view-${t?.id ?? t?.trade_id ?? "unknown"}`} size="small" onClick={() => void openTrade(t)}>
                     View
                   </Button>
                 </TableCell>
@@ -196,7 +216,7 @@ export default function TradesPositions() {
           {tradeRows.length === 0 && (
             <TableRow>
               <TableCell colSpan={7} sx={{ opacity: 0.8 }}>
-                {loading ? "Loading..." : "No trades."}
+                {loading ? "Loading..." : apiError ? "API unreachable." : "No trades."}
               </TableCell>
             </TableRow>
           )}

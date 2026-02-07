@@ -302,6 +302,10 @@ try:
     UPSTREAM_RETRY_BACKOFF_SEC = max(0.1, float(_env("UPSTREAM_RETRY_BACKOFF_SEC", "0.4")))
 except Exception:
     UPSTREAM_RETRY_BACKOFF_SEC = 0.4
+try:
+    HEALTH_EVENT_WINDOW_SEC = max(15, int(float(_env("HEALTH_EVENT_WINDOW_SEC", "90"))))
+except Exception:
+    HEALTH_EVENT_WINDOW_SEC = 90
 
 ROLE_URLS: Dict[str, str] = {
     "paper": MINA_PAPER_URL,
@@ -929,12 +933,7 @@ def _runtime_row_for_role(role: str) -> Dict[str, Any]:
             "bot_version",
         ],
     )
-
-    last_heartbeat = (
-        settings.get("execution_monitor_heartbeat")
-        or settings.get("last_heartbeat")
-        or settings.get("bot_heartbeat")
-    )
+    hb = _role_heartbeat_snapshot(schema, role, window_sec=HEALTH_EVENT_WINDOW_SEC)
     db_state: Dict[str, Any] = {}
     if role == "pump" and _table_exists(schema, "pump_hunter_state"):
         with psycopg.connect(AUDIT_DSN, autocommit=True, row_factory=dict_row) as conn:
@@ -981,7 +980,10 @@ def _runtime_row_for_role(role: str) -> Dict[str, Any]:
         "service_name": str((chosen or {}).get("service_name") or ""),
         "version": str((chosen or {}).get("version") or settings.get("BOT_VERSION") or settings.get("bot_version") or ""),
         "entrypoint": entrypoint,
-        "last_heartbeat": last_heartbeat,
+        "last_heartbeat": hb.get("last_heartbeat"),
+        "last_seen_seconds": hb.get("last_seen_seconds"),
+        "online": bool(hb.get("online")),
+        "heartbeat_source": hb.get("heartbeat_source"),
         "last_decision": settings.get("last_decision"),
         "last_error": settings.get("last_error") or db_state.get("last_error"),
         "kill_switch": str(settings.get("kill_switch") or "0"),
@@ -1996,17 +1998,68 @@ def _upsert_settings(schema: str, payload: Dict[str, Any], source: str = "gatewa
     return updated
 
 
-def _fetch_signal_rows(schema: str, *, status: str | None = None, limit: int = 30) -> list[dict]:
+def _fetch_signal_rows(
+    schema: str,
+    *,
+    status: str | None = None,
+    source: str | None = None,
+    symbol: str | None = None,
+    timeframe: str | None = None,
+    strategy: str | None = None,
+    from_ms: int | None = None,
+    to_ms: int | None = None,
+    limit: int = 30,
+) -> list[dict]:
     if not _table_exists(schema, "signal_inbox"):
         return []
     cols = _table_columns(schema, "signal_inbox")
     order_col = "received_at_ms" if "received_at_ms" in cols else ("id" if "id" in cols else None)
+    ts_ms_col = "received_at_ms" if "received_at_ms" in cols else ("created_at_ms" if "created_at_ms" in cols else None)
+    ts_text_col = "received_at" if "received_at" in cols else ("created_at" if "created_at" in cols else None)
     where: list[str] = []
     params: list[Any] = []
+
     st = str(status or "").strip().upper()
-    if st and st != "ALL":
-        where.append("UPPER(status) = %s")
+    if st and st != "ALL" and "status" in cols:
+        where.append("UPPER(COALESCE(status,'')) = %s")
         params.append(st)
+
+    src = str(source or "").strip()
+    if src and "source" in cols:
+        where.append("source ILIKE %s")
+        params.append(f"%{src}%")
+
+    sym = str(symbol or "").strip().upper()
+    if sym and "symbol" in cols:
+        where.append("UPPER(COALESCE(symbol,'')) = %s")
+        params.append(sym)
+
+    tf = str(timeframe or "").strip()
+    if tf and "timeframe" in cols:
+        where.append("LOWER(COALESCE(timeframe,'')) = %s")
+        params.append(tf.lower())
+
+    strat = str(strategy or "").strip()
+    if strat and "strategy" in cols:
+        where.append("strategy ILIKE %s")
+        params.append(f"%{strat}%")
+
+    if from_ms is not None:
+        if ts_ms_col:
+            where.append(f"{ts_ms_col} >= %s")
+            params.append(int(from_ms))
+        elif ts_text_col:
+            where.append(f"{ts_text_col} >= %s")
+            params.append(_ms_to_iso(int(from_ms)))
+
+    if to_ms is not None:
+        if ts_ms_col:
+            where.append(f"{ts_ms_col} <= %s")
+            params.append(int(to_ms))
+        elif ts_text_col:
+            where.append(f"{ts_text_col} <= %s")
+            params.append(_ms_to_iso(int(to_ms)))
+
     q = f"SELECT * FROM {schema}.signal_inbox"
     if where:
         q += " WHERE " + " AND ".join(where)
@@ -2019,9 +2072,146 @@ def _fetch_signal_rows(schema: str, *, status: str | None = None, limit: int = 3
             cur.execute(q, params)
             rows = [dict(r) for r in (cur.fetchall() or [])]
     for row in rows:
-        payload = _safe_json_loads(row.get("payload"), {})
+        payload_raw = row.get("payload")
+        if payload_raw in (None, ""):
+            payload_raw = row.get("payload_json")
+        payload = _safe_json_loads(payload_raw, {})
         row["payload"] = payload if isinstance(payload, dict) else {}
     return rows
+
+
+def _latest_role_health_event(schema: str, role: str) -> Dict[str, Any] | None:
+    if not _table_exists(schema, "events"):
+        return None
+    cols = _table_columns(schema, "events")
+    event_col = "event_type" if "event_type" in cols else ("type" if "type" in cols else None)
+    if not event_col:
+        return None
+    source_col = "source" if "source" in cols else None
+    payload_col = next((c for c in ("payload_json", "payload", "data", "meta") if c in cols), None)
+    ts_ms_col = "created_at_ms" if "created_at_ms" in cols else ("timestamp_ms" if "timestamp_ms" in cols else None)
+    ts_text_col = "created_at" if "created_at" in cols else ("timestamp" if "timestamp" in cols else None)
+    role_col = "bot_role" if "bot_role" in cols else None
+    order_col = ts_ms_col or ("id" if "id" in cols else None)
+
+    where: list[str] = [f"UPPER(COALESCE({event_col},'')) IN ('HEALTHEVENT','HEALTH_EVENT','HEARTBEAT','HEARTBEAT_EVENT','HEALTH')"]
+    params: list[Any] = []
+    if role_col:
+        where.append(f"(LOWER(COALESCE({role_col},'')) = %s OR COALESCE({role_col},'') = '')")
+        params.append(str(role).strip().lower())
+
+    q = f"SELECT * FROM {schema}.events WHERE {' AND '.join(where)}"
+    if order_col:
+        q += f" ORDER BY {order_col} DESC"
+    q += " LIMIT 20"
+
+    with psycopg.connect(AUDIT_DSN, autocommit=True, row_factory=dict_row) as conn:
+        with conn.cursor() as cur:
+            cur.execute(q, params)
+            rows = [dict(r) for r in (cur.fetchall() or [])]
+
+    for row in rows:
+        payload = _safe_json_loads(row.get(payload_col), {}) if payload_col else {}
+        if not isinstance(payload, dict):
+            payload = {}
+        payload_inner = payload.get("payload") if isinstance(payload.get("payload"), dict) else {}
+        heartbeat_ms = _as_int(payload.get("heartbeat_ms"), 0) or _as_int(payload_inner.get("heartbeat_ms"), 0)
+        if heartbeat_ms <= 0 and ts_ms_col:
+            heartbeat_ms = _as_int(row.get(ts_ms_col), 0)
+        if heartbeat_ms <= 0 and ts_text_col:
+            heartbeat_ms = _parse_ts_ms(str(row.get(ts_text_col) or "")) or 0
+        if heartbeat_ms <= 0:
+            continue
+        return {
+            "heartbeat_ms": int(heartbeat_ms),
+            "last_heartbeat": _ms_to_iso(int(heartbeat_ms)),
+            "source": str(row.get(source_col) or payload.get("source") or payload_inner.get("source") or "events"),
+            "component": str(payload.get("component") or payload_inner.get("component") or ""),
+            "event_type": str(row.get(event_col) or ""),
+        }
+    return None
+
+
+def _latest_shared_health_event(role: str) -> Dict[str, Any] | None:
+    role_v = str(role or "").strip().lower()
+    if not role_v:
+        return None
+    try:
+        _ensure_events_table(AUDIT_DSN)
+        with psycopg.connect(AUDIT_DSN, autocommit=True, row_factory=dict_row) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    SELECT id, bot_role, event_type, data, created_at
+                    FROM {EVENTS_TABLE}
+                    WHERE LOWER(COALESCE(bot_role,'')) = %s
+                      AND UPPER(COALESCE(event_type,'')) IN ('HEALTHEVENT','HEALTH_EVENT','HEARTBEAT','HEARTBEAT_EVENT','HEALTH')
+                    ORDER BY id DESC
+                    LIMIT 5
+                    """,
+                    (role_v,),
+                )
+                rows = [dict(r) for r in (cur.fetchall() or [])]
+    except Exception:
+        return None
+
+    for row in rows:
+        data = row.get("data")
+        if isinstance(data, str):
+            data = _safe_json_loads(data, {})
+        if not isinstance(data, dict):
+            data = {}
+        payload = data.get("payload") if isinstance(data.get("payload"), dict) else {}
+        heartbeat_ms = _as_int(data.get("created_at_ms"), 0) or _as_int(payload.get("heartbeat_ms"), 0)
+        if heartbeat_ms <= 0:
+            heartbeat_ms = _parse_ts_ms(str(row.get("created_at") or "")) or 0
+        if heartbeat_ms <= 0:
+            continue
+        return {
+            "heartbeat_ms": int(heartbeat_ms),
+            "last_heartbeat": _ms_to_iso(int(heartbeat_ms)),
+            "source": str(data.get("source") or payload.get("source") or "shared_events"),
+            "component": str(payload.get("component") or ""),
+            "event_type": str(row.get("event_type") or ""),
+        }
+    return None
+
+
+def _role_heartbeat_snapshot(schema: str, role: str, *, window_sec: int = HEALTH_EVENT_WINDOW_SEC) -> Dict[str, Any]:
+    settings = _fetch_settings(schema, ["execution_monitor_heartbeat", "last_heartbeat", "bot_heartbeat"])
+    setting_hb_raw = settings.get("execution_monitor_heartbeat") or settings.get("last_heartbeat") or settings.get("bot_heartbeat")
+    setting_ms = _parse_ts_ms(str(setting_hb_raw or "")) if setting_hb_raw else None
+    event_hb = _latest_role_health_event(schema, role) or _latest_shared_health_event(role)
+
+    heartbeat_ms = _as_int((event_hb or {}).get("heartbeat_ms"), 0)
+    source = "events" if heartbeat_ms > 0 else "settings"
+    component = str((event_hb or {}).get("component") or "")
+    event_type = str((event_hb or {}).get("event_type") or "")
+
+    if heartbeat_ms <= 0 and setting_ms is not None:
+        heartbeat_ms = int(setting_ms)
+        component = ""
+        event_type = ""
+
+    if heartbeat_ms <= 0:
+        return {
+            "online": False,
+            "last_heartbeat": setting_hb_raw,
+            "last_seen_seconds": None,
+            "heartbeat_source": "none",
+            "heartbeat_component": component,
+            "heartbeat_event_type": event_type,
+        }
+
+    age_sec = max(0, int((_ms_now() - int(heartbeat_ms)) / 1000))
+    return {
+        "online": age_sec <= max(5, int(window_sec or 90)),
+        "last_heartbeat": _ms_to_iso(int(heartbeat_ms)),
+        "last_seen_seconds": age_sec,
+        "heartbeat_source": source,
+        "heartbeat_component": component,
+        "heartbeat_event_type": event_type,
+    }
 
 
 def _fetch_signal_one(schema: str, signal_id: int) -> Optional[dict]:
@@ -3276,24 +3466,39 @@ async def api_unified_role_snapshot(role: Role):
 @app.get("/api/unified/{role}/system_health")
 async def api_unified_role_system_health(role: Role):
     schema = _schema_for_role(role)
-    settings = _fetch_settings(schema, ["execution_monitor_heartbeat", "last_heartbeat", "bot_heartbeat", "kill_switch", "last_error"])
-    hb = settings.get("execution_monitor_heartbeat") or settings.get("last_heartbeat") or settings.get("bot_heartbeat")
-    age = None
-    if hb:
+    settings = _fetch_settings(schema, ["kill_switch", "last_error"])
+    hb = _role_heartbeat_snapshot(schema, role, window_sec=HEALTH_EVENT_WINDOW_SEC)
+
+    legacy: Dict[str, Any] | None = None
+    if hb.get("last_heartbeat") is None:
         try:
-            age = int((dt.datetime.now(dt.timezone.utc) - dt.datetime.fromisoformat(str(hb).replace("Z", "+00:00")).astimezone(dt.timezone.utc)).total_seconds())
+            headers = {"X-API-Key": DASHBOARD_API_KEY} if DASHBOARD_API_KEY else {}
+            legacy_raw = await _fetch_json(f"{ROLE_URLS[role].rstrip('/')}/api/system_health", headers=headers)
+            if isinstance(legacy_raw, dict):
+                legacy = legacy_raw
         except Exception:
-            age = None
+            legacy = None
+    if legacy and hb.get("last_heartbeat") is None:
+        hb["last_heartbeat"] = legacy.get("last_heartbeat")
+        hb["last_seen_seconds"] = legacy.get("last_seen_seconds")
+        hb["online"] = bool(legacy.get("online"))
+        hb["heartbeat_source"] = "legacy_dashboard"
+
     out = {
         "ok": True,
         "role": role,
         "schema": schema,
-        "online": (age is not None and age <= 90),
-        "last_heartbeat": hb,
-        "last_seen_seconds": age,
+        "online": bool(hb.get("online")),
+        "last_heartbeat": hb.get("last_heartbeat"),
+        "last_seen_seconds": hb.get("last_seen_seconds"),
         "kill_switch": settings.get("kill_switch"),
         "last_error": settings.get("last_error"),
+        "heartbeat_source": hb.get("heartbeat_source"),
+        "heartbeat_component": hb.get("heartbeat_component"),
+        "heartbeat_event_type": hb.get("heartbeat_event_type"),
     }
+    if legacy is not None:
+        out["legacy_system_health"] = legacy
     return out
 
 @app.get("/api/unified/{role}/stats")
@@ -3383,10 +3588,49 @@ async def api_unified_commands_history(role: Role, limit: int = 50):
     return {"ok": True, "role": role, "schema": schema, "items": rows, "count": len(rows)}
 
 @app.get("/api/unified/{role}/signals")
-async def api_unified_role_signals(role: Role, limit: int = 30, status: str | None = None):
+async def api_unified_role_signals(
+    role: Role,
+    limit: int = 30,
+    status: str | None = None,
+    source: str | None = None,
+    symbol: str | None = None,
+    timeframe: str | None = None,
+    strategy: str | None = None,
+    from_ts: str | None = None,
+    to_ts: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+):
     schema = _schema_for_role(role)
-    rows = _fetch_signal_rows(schema, status=status, limit=limit)
-    return {"ok": True, "role": role, "schema": schema, "items": rows, "count": len(rows)}
+    from_ms = _parse_ts_ms(from_ts or date_from)
+    to_ms = _parse_ts_ms(to_ts or date_to)
+    rows = _fetch_signal_rows(
+        schema,
+        status=status,
+        source=source,
+        symbol=symbol,
+        timeframe=timeframe,
+        strategy=strategy,
+        from_ms=from_ms,
+        to_ms=to_ms,
+        limit=limit,
+    )
+    return {
+        "ok": True,
+        "role": role,
+        "schema": schema,
+        "items": rows,
+        "count": len(rows),
+        "filters": {
+            "status": status,
+            "source": source,
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "strategy": strategy,
+            "from_ts": from_ts or date_from,
+            "to_ts": to_ts or date_to,
+        },
+    }
 
 @app.get("/api/unified/{role}/signals/{signal_id}")
 async def api_unified_signal_detail(role: Role, signal_id: int):
@@ -7861,7 +8105,10 @@ def _fetch_pump_candidate_row(candidate_id: int) -> Dict[str, Any] | None:
                 cur.execute(f"SELECT * FROM {schema}.pump_candidates WHERE id = %s LIMIT 1", (int(candidate_id),))
                 row = dict(cur.fetchone() or {})
                 if row:
-                    p = _safe_json_loads(row.get("payload"), {})
+                    raw_payload = row.get("payload")
+                    if raw_payload in (None, ""):
+                        raw_payload = row.get("payload_json")
+                    p = _safe_json_loads(raw_payload, {})
                     row["payload"] = p if isinstance(p, dict) else {}
                     return row
     # Fallback: signal inbox row can also be promoted.
@@ -7887,6 +8134,94 @@ def _set_pump_candidate_status(candidate_id: int, status: str, note: str | None 
     with psycopg.connect(AUDIT_DSN, autocommit=True) as conn:
         with conn.cursor() as cur:
             cur.execute(f"UPDATE {schema}.pump_candidates SET {', '.join(fields)} WHERE id = %s", vals)
+
+
+def _list_pump_candidates(limit: int = 50, status: str | None = "PENDING") -> list[dict]:
+    schema = _schema_for_role("pump")
+    if not _table_exists(schema, "pump_candidates"):
+        return []
+    cols = _table_columns(schema, "pump_candidates")
+    where: list[str] = []
+    params: list[Any] = []
+    st = str(status or "").strip().upper()
+    if st and st != "ALL" and "status" in cols:
+        where.append("UPPER(COALESCE(status,'')) = %s")
+        params.append(st)
+    order_col = "created_at_ms" if "created_at_ms" in cols else ("id" if "id" in cols else None)
+    q = f"SELECT * FROM {schema}.pump_candidates"
+    if where:
+        q += " WHERE " + " AND ".join(where)
+    if order_col:
+        q += f" ORDER BY {order_col} DESC"
+    q += " LIMIT %s"
+    params.append(max(1, min(int(limit or 50), 1000)))
+    with psycopg.connect(AUDIT_DSN, autocommit=True, row_factory=dict_row) as conn:
+        with conn.cursor() as cur:
+            cur.execute(q, params)
+            rows = [dict(r) for r in (cur.fetchall() or [])]
+    for row in rows:
+        payload = _safe_json_loads(row.get("payload_json"), {})
+        row["payload"] = payload if isinstance(payload, dict) else {}
+    return rows
+
+
+def _pump_status_snapshot() -> Dict[str, Any]:
+    schema = _schema_for_role("pump")
+    state = {}
+    if _table_exists(schema, "pump_hunter_state"):
+        with psycopg.connect(AUDIT_DSN, autocommit=True, row_factory=dict_row) as conn:
+            with conn.cursor() as cur:
+                cur.execute(f"SELECT * FROM {schema}.pump_hunter_state ORDER BY id DESC LIMIT 1")
+                state = dict(cur.fetchone() or {})
+
+    counts = {"WATCH": 0, "PENDING": 0, "APPROVED": 0, "REJECTED": 0, "EXECUTED": 0, "PROMOTED": 0}
+    if _table_exists(schema, "pump_candidates"):
+        with psycopg.connect(AUDIT_DSN, autocommit=True, row_factory=dict_row) as conn:
+            with conn.cursor() as cur:
+                cur.execute(f"SELECT status, COUNT(*) AS c FROM {schema}.pump_candidates GROUP BY status")
+                for r in cur.fetchall() or []:
+                    key = str(r.get("status") or "").upper()
+                    counts[key] = int(r.get("c") or 0)
+
+    return {"status": "ok", "state": state, "counts": counts}
+
+
+def _insert_pump_label_row(symbol: str, timestamp_ms: int, label: str, note: str = "") -> int:
+    schema = _schema_for_role("pump")
+    if not _table_exists(schema, "pump_labels"):
+        raise HTTPException(status_code=503, detail=f"{schema}.pump_labels_missing")
+    cols = _table_columns(schema, "pump_labels")
+    fields: list[str] = []
+    vals: list[Any] = []
+    if "created_at_ms" in cols:
+        fields.append("created_at_ms")
+        vals.append(_ms_now())
+    if "symbol" in cols:
+        fields.append("symbol")
+        vals.append(str(symbol).upper().strip())
+    if "timestamp_ms" in cols:
+        fields.append("timestamp_ms")
+        vals.append(int(timestamp_ms))
+    if "label" in cols:
+        fields.append("label")
+        vals.append(str(label or "PUMP").strip() or "PUMP")
+    if "note" in cols:
+        fields.append("note")
+        vals.append(str(note or ""))
+    if not fields:
+        raise HTTPException(status_code=503, detail=f"{schema}.pump_labels_columns_missing")
+    placeholders = ",".join(["%s"] * len(fields))
+    returning = " RETURNING id" if "id" in cols else ""
+    with psycopg.connect(AUDIT_DSN, autocommit=True, row_factory=dict_row) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"INSERT INTO {schema}.pump_labels ({', '.join(fields)}) VALUES ({placeholders}){returning}",
+                vals,
+            )
+            if "id" in cols:
+                row = cur.fetchone() or {}
+                return int(row.get("id") or 0)
+    return 0
 
 
 def _promote_pump_candidate_to_role(
@@ -8010,6 +8345,55 @@ async def api_pump_candidate_promote(request: Request):
     return out
 
 
+@app.get("/api/pump/status")
+async def api_pump_status():
+    snap = _pump_status_snapshot()
+    return {"ok": True, **snap}
+
+
+@app.get("/api/pump/candidates")
+async def api_pump_candidates(limit: int = 50, status: str = "PENDING"):
+    rows = _list_pump_candidates(limit=limit, status=status)
+    return {"ok": True, "status": "ok", "items": rows, "count": len(rows)}
+
+
+@app.post("/api/pump/candidates/approve")
+async def api_pump_candidate_approve(request: Request):
+    return await mina_proxy_post("pump", "pump/candidates/approve", request)
+
+
+@app.post("/api/pump/candidates/reject")
+async def api_pump_candidate_reject(request: Request):
+    return await mina_proxy_post("pump", "pump/candidates/reject", request)
+
+
+@app.post("/api/pump/label")
+async def api_pump_label(request: Request):
+    return await mina_proxy_post("pump", "pump/label", request)
+
+
+@app.get("/api/pump/stats")
+async def api_pump_stats():
+    schema = _schema_for_role("pump")
+    summary = _portfolio_summary_for_schema(schema, None, None)
+    return {
+        "ok": True,
+        "status": "ok",
+        "schema": schema,
+        "trades": int(summary.get("trades") or 0),
+        "wins": int(summary.get("wins") or 0),
+        "losses": int(summary.get("losses") or 0),
+        "realized_pnl": float(summary.get("realized_pnl") or 0.0),
+        "pump": _pump_status_snapshot().get("counts") or {},
+    }
+
+
+@app.get("/api/pump/trades")
+async def api_pump_trades(limit: int = 50, status: str | None = None):
+    rows = await _trades_fetch(role="pump", limit=limit, status=status)
+    return {"ok": True, "status": "ok", "items": rows, "count": len(rows)}
+
+
 @app.get("/api/mina/{role}/{path:path}")
 async def mina_proxy(role: Role, path: str, request: Request):
     """
@@ -8029,8 +8413,39 @@ async def mina_proxy(role: Role, path: str, request: Request):
     if path_l == "signals":
         limit = int(params.get("limit") or 50)
         status = params.get("status")
-        rows = _fetch_signal_rows(schema, status=str(status) if status else None, limit=limit)
+        rows = _fetch_signal_rows(
+            schema,
+            status=str(status) if status else None,
+            source=str(params.get("source") or "").strip() or None,
+            symbol=str(params.get("symbol") or "").strip() or None,
+            timeframe=str(params.get("timeframe") or "").strip() or None,
+            strategy=str(params.get("strategy") or "").strip() or None,
+            from_ms=_parse_ts_ms(str(params.get("from_ts") or params.get("date_from") or "")),
+            to_ms=_parse_ts_ms(str(params.get("to_ts") or params.get("date_to") or "")),
+            limit=limit,
+        )
         return {"ok": True, "items": rows, "count": len(rows)}
+    if role == "pump" and path_l == "pump/status":
+        return _pump_status_snapshot()
+    if role == "pump" and path_l == "pump/candidates":
+        limit = int(params.get("limit") or 50)
+        status = str(params.get("status") or "PENDING")
+        rows = _list_pump_candidates(limit=limit, status=status)
+        return {"status": "ok", "items": rows}
+    if role == "pump" and path_l == "pump/stats":
+        summary = _portfolio_summary_for_schema(schema, None, None)
+        return {
+            "status": "ok",
+            "schema": schema,
+            "trades": int(summary.get("trades") or 0),
+            "wins": int(summary.get("wins") or 0),
+            "losses": int(summary.get("losses") or 0),
+            "realized_pnl": float(summary.get("realized_pnl") or 0.0),
+            "pump": _pump_status_snapshot().get("counts") or {},
+        }
+    if role == "pump" and path_l == "trades":
+        rows = await _trades_fetch(role="pump", limit=int(params.get("limit") or 50), status=params.get("status"))
+        return {"status": "ok", "items": rows}
     if path_l.startswith("signals/"):
         try:
             sid = int(path_l.split("/", 1)[1])
@@ -8114,6 +8529,98 @@ async def mina_proxy_post(role: Role, path: str, request: Request):
             actor=actor,
             trace_id=trace_id,
         )
+
+    if role == "pump" and path_l == "pump/candidates/approve":
+        cid = _as_int(body.get("id") or body.get("candidate_id"), 0)
+        if cid <= 0:
+            raise HTTPException(status_code=400, detail="candidate id is required")
+        note = str(body.get("note") or "").strip()
+        rec = _fetch_pump_candidate_row(cid)
+        if not rec:
+            raise HTTPException(status_code=404, detail="pump_candidate_not_found")
+        _set_pump_candidate_status(cid, "APPROVED", note=note)
+        evt_payload = {
+            "trace_id": trace_id,
+            "candidate_id": cid,
+            "symbol": str(rec.get("symbol") or ""),
+            "status": "APPROVED",
+            "actor": _actor_from_request(request),
+            "note": note,
+        }
+        _insert_role_event(schema, "PUMP_CANDIDATE_APPROVED", evt_payload)
+        _insert_shared_event("pump", "PUMP_CANDIDATE_APPROVED", evt_payload)
+        await _audit_write(
+            request=request,
+            action="PUMP_CANDIDATE_APPROVE",
+            role="pump",
+            target_id=str(cid),
+            trace_id=trace_id,
+            request_json={"id": cid, "note": note},
+            response_json={"ok": True},
+            ok=True,
+        )
+        return {"ok": True, "status": "ok", "trace_id": trace_id, "id": cid}
+
+    if role == "pump" and path_l == "pump/candidates/reject":
+        cid = _as_int(body.get("id") or body.get("candidate_id"), 0)
+        if cid <= 0:
+            raise HTTPException(status_code=400, detail="candidate id is required")
+        note = str(body.get("note") or "").strip()
+        rec = _fetch_pump_candidate_row(cid)
+        if not rec:
+            raise HTTPException(status_code=404, detail="pump_candidate_not_found")
+        _set_pump_candidate_status(cid, "REJECTED", note=note)
+        evt_payload = {
+            "trace_id": trace_id,
+            "candidate_id": cid,
+            "symbol": str(rec.get("symbol") or ""),
+            "status": "REJECTED",
+            "actor": _actor_from_request(request),
+            "note": note,
+        }
+        _insert_role_event(schema, "PUMP_CANDIDATE_REJECTED", evt_payload)
+        _insert_shared_event("pump", "PUMP_CANDIDATE_REJECTED", evt_payload)
+        await _audit_write(
+            request=request,
+            action="PUMP_CANDIDATE_REJECT",
+            role="pump",
+            target_id=str(cid),
+            trace_id=trace_id,
+            request_json={"id": cid, "note": note},
+            response_json={"ok": True},
+            ok=True,
+        )
+        return {"ok": True, "status": "ok", "trace_id": trace_id, "id": cid}
+
+    if role == "pump" and path_l == "pump/label":
+        symbol = str(body.get("symbol") or "").strip().upper()
+        ts_ms = _as_int(body.get("timestamp_ms"), 0)
+        label = str(body.get("label") or "PUMP").strip() or "PUMP"
+        note = str(body.get("note") or "").strip()
+        if not symbol or ts_ms <= 0:
+            raise HTTPException(status_code=400, detail="symbol and timestamp_ms are required")
+        label_id = _insert_pump_label_row(symbol, ts_ms, label, note)
+        evt_payload = {
+            "trace_id": trace_id,
+            "symbol": symbol,
+            "timestamp_ms": ts_ms,
+            "label": label,
+            "note": note,
+            "label_id": label_id,
+        }
+        _insert_role_event(schema, "PUMP_LABEL_SET", evt_payload)
+        _insert_shared_event("pump", "PUMP_LABEL_SET", evt_payload)
+        await _audit_write(
+            request=request,
+            action="PUMP_LABEL_SET",
+            role="pump",
+            target_id=symbol,
+            trace_id=trace_id,
+            request_json={"symbol": symbol, "timestamp_ms": ts_ms, "label": label, "note": note},
+            response_json={"ok": True, "id": label_id},
+            ok=True,
+        )
+        return {"ok": True, "status": "ok", "trace_id": trace_id, "id": int(label_id or 0)}
 
     # DB-native write paths (dashboard-independent).
     if path_l in ("commands/queue", "command"):

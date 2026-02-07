@@ -104,11 +104,48 @@ export async function fetchUnifiedSyncStatus(role: UnifiedRole): Promise<any> {
 }
 
 
-export async function fetchUnifiedSignals(role: UnifiedRole, limit: number = 30, status?: string): Promise<any[]> {
-  const params: any = { limit };
+export type UnifiedSignalsQuery = {
+  limit?: number;
+  status?: string;
+  source?: string;
+  symbol?: string;
+  timeframe?: string;
+  strategy?: string;
+  from_ts?: string;
+  to_ts?: string;
+};
+
+export async function fetchUnifiedSignals(
+  role: UnifiedRole,
+  limitOrQuery: number | UnifiedSignalsQuery = 30,
+  status?: string,
+): Promise<{ ok: boolean; items: any[]; count: number; [key: string]: any }> {
+  const params: any =
+    typeof limitOrQuery === "number"
+      ? { limit: limitOrQuery }
+      : {
+          limit: limitOrQuery.limit ?? 30,
+          status: limitOrQuery.status,
+          source: limitOrQuery.source,
+          symbol: limitOrQuery.symbol,
+          timeframe: limitOrQuery.timeframe,
+          strategy: limitOrQuery.strategy,
+          from_ts: limitOrQuery.from_ts,
+          to_ts: limitOrQuery.to_ts,
+        };
   if (status && status !== "all") params.status = status;
+
   const { data } = await api.get(`/unified/${role}/signals`, { params });
-  return data;
+  if (Array.isArray(data)) {
+    return { ok: true, items: data, count: data.length };
+  }
+  const items = Array.isArray(data?.items) ? data.items : [];
+  return {
+    ok: Boolean(data?.ok ?? true),
+    count: Number(data?.count ?? items.length),
+    items,
+    ...(data && typeof data === "object" ? data : {}),
+  };
 }
 
 export async function fetchUnifiedPositions(role: UnifiedRole): Promise<any> {

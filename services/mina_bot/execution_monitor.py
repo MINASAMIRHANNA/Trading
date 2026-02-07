@@ -552,10 +552,16 @@ class ExecutionMonitor:
 
 
                         # Attempt to close the exchange position (idempotent if already flat)
-
-                        close_resp = self.client.close_open_position(symbol, reason=reason)
-
-                        avg_price = float(close_resp.get('avgPrice', 0) or 0.0) if isinstance(close_resp, dict) else 0.0
+                        # Use trading_executor helper (works with _NoPingClient wrapper).
+                        close_resp = close_open_position(symbol, execution_allowed=True)
+                        if isinstance(close_resp, dict) and (close_resp.get('ok') is False):
+                            raise Exception(str(close_resp.get('error') or 'close_position_failed'))
+                        avg_raw = None
+                        if isinstance(close_resp, dict):
+                            avg_raw = close_resp.get('avgPrice')
+                            if avg_raw in (None, "") and isinstance(close_resp.get('result'), dict):
+                                avg_raw = close_resp.get('result', {}).get('avgPrice')
+                        avg_price = float(avg_raw or 0.0)
 
                         close_price = avg_price if avg_price > 0 else (self._get_last_price(symbol) or 0.0)
 

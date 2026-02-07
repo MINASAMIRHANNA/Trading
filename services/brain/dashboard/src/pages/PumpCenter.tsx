@@ -151,14 +151,14 @@ export default function PumpCenter() {
         Pump Center
       </Typography>
       <Typography variant="body2" sx={{ opacity: 0.8, mb: 2 }}>
-        Pump-only controls via Gateway proxy (/api/mina/pump/*). No direct execution.
+        Pump-only controls via Gateway `/api/pump/*` endpoints. No direct execution.
       </Typography>
       <Alert severity="info" sx={{ mb: 2 }}>
         Pump Hunter is signal-only. Promote candidates to <b>paper</b> or <b>live</b> for execution via role command queues.
       </Alert>
 
       <Stack direction="row" spacing={2} alignItems="center" sx={{ mb: 2 }} flexWrap="wrap">
-        <Button variant="outlined" onClick={() => void load()} disabled={loading}>
+        <Button data-testid="pump-refresh" variant="outlined" onClick={() => void load()} disabled={loading}>
           Refresh
         </Button>
         <TextField
@@ -254,10 +254,10 @@ export default function PumpCenter() {
                   </TableCell>
                   <TableCell align="right">
                     <Stack direction="row" spacing={1} justifyContent="flex-end">
-                      <Button size="small" onClick={() => action(() => approvePumpCandidate({ id, note }), "Approved")}>
+                      <Button data-testid={`pump-approve-${id || "na"}`} size="small" disabled={id <= 0} onClick={() => action(() => approvePumpCandidate({ id, note }), "Approved")}>
                         Approve
                       </Button>
-                      <Button size="small" onClick={() => action(() => rejectPumpCandidate({ id, note }), "Rejected")}>
+                      <Button data-testid={`pump-reject-${id || "na"}`} size="small" disabled={id <= 0} onClick={() => action(() => rejectPumpCandidate({ id, note }), "Rejected")}>
                         Reject
                       </Button>
                       <TextField
@@ -290,13 +290,11 @@ export default function PumpCenter() {
                           </MenuItem>
                         ))}
                       </TextField>
-                      <Button
-                        size="small"
-                        onClick={() => void runPromoteCandidate(id, side, targetRole, note)}
-                      >
+                      <Button data-testid={`pump-promote-${id || "na"}`} size="small" disabled={id <= 0} onClick={() => void runPromoteCandidate(id, side, targetRole, note)}>
                         Promote
                       </Button>
                       <Button
+                        data-testid={`pump-label-${id || "na"}`}
                         size="small"
                         disabled={!c.symbol || !ts}
                         onClick={() =>

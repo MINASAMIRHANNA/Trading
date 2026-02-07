@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { api } from "../api/client";
 import { fetchMinaStatus } from "../api/minaPages";
 import { sendOpsCommand } from "../api/ops";
-import { type UnifiedRole, fetchUnifiedSystemHealth } from "../api/unified";
+import { type UnifiedRole, fetchUnifiedSystemHealth, queueUnifiedKillSwitch } from "../api/unified";
 import { DataTable, KpiCard, Panel, SectionHeader, StatusPill } from "../components/mina";
 import ProjectDoctor from "./ProjectDoctor";
 import { requestLiveGuard } from "../utils/liveGuard";
@@ -19,10 +19,12 @@ export default function StatusMaintenance() {
   const [stack, setStack] = useState<any>(null);
   const [statusByRole, setStatusByRole] = useState<Record<string, any>>({});
   const [healthByRole, setHealthByRole] = useState<Record<string, any>>({});
+  const [runtimeByRole, setRuntimeByRole] = useState<Record<string, any>>({});
+  const [dbFingerprint, setDbFingerprint] = useState<any>(null);
 
   const load = async () => {
     try {
-      const [stackRes, pStatus, lStatus, uStatus, pHealth, lHealth, uHealth] = await Promise.all([
+      const [stackRes, pStatus, lStatus, uStatus, pHealth, lHealth, uHealth, runtimeRes, dbRes] = await Promise.all([
         api.get("/stack/health"),
         fetchMinaStatus("paper"),
         fetchMinaStatus("live"),
@@ -30,10 +32,14 @@ export default function StatusMaintenance() {
         fetchUnifiedSystemHealth("paper"),
         fetchUnifiedSystemHealth("live"),
         fetchUnifiedSystemHealth("pump"),
+        api.get("/ops/runtime?role=all"),
+        api.get("/ops/db_fingerprint"),
       ]);
       setStack(stackRes?.data || {});
       setStatusByRole({ paper: pStatus, live: lStatus, pump: uStatus });
       setHealthByRole({ paper: pHealth, live: lHealth, pump: uHealth });
+      setRuntimeByRole(runtimeRes?.data?.items || {});
+      setDbFingerprint(dbRes?.data || {});
       setLastUpdated(new Date().toISOString());
       setMessage("");
     } catch (err: any) {
@@ -59,6 +65,23 @@ export default function StatusMaintenance() {
       await load();
     } catch (err: any) {
       setMessage(err?.message || "Maintenance action failed.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const setKillSwitch = async (enabled: boolean) => {
+    if (role !== "paper") {
+      setMessage("Kill switch controls in this view are limited to TEST/PAPER role.");
+      return;
+    }
+    setBusy(true);
+    try {
+      await queueUnifiedKillSwitch(role, enabled, "status_maintenance");
+      setMessage(`Kill switch ${enabled ? "ENABLED" : "DISABLED"} for ${role}.`);
+      await load();
+    } catch (err: any) {
+      setMessage(err?.message || "Kill switch action failed.");
     } finally {
       setBusy(false);
     }
@@ -105,6 +128,16 @@ export default function StatusMaintenance() {
     ];
   }, [dashboardRows, lastUpdated, role, stackRows.length]);
 
+  const runtimeRows = useMemo(() => {
+    return Object.entries(runtimeByRole || {}).map(([r, v]) => ({ role: r, ...(v as any) }));
+  }, [runtimeByRole]);
+
+  const pumpRuntime = runtimeByRole?.pump || {};
+  const pumpEntrypointOk = String(pumpRuntime?.entrypoint || "").includes("pump_hunter.py");
+  const dbHost = String(dbFingerprint?.dsn?.host || "");
+  const dbName = String(dbFingerprint?.dsn?.db || "");
+  const singleDbOk = dbHost === "postgres" && dbName === "trading";
+
   return (
     <div>
       <SectionHeader
@@ -115,18 +148,18 @@ export default function StatusMaintenance() {
 
       <Panel title="Scope">
         <div className="filters-row">
-          <select className="dark-select" value={role} onChange={(e) => setRole(e.target.value as UnifiedRole)}>
+          <select data-testid="status-role" className="dark-select" value={role} onChange={(e) => setRole(e.target.value as UnifiedRole)}>
             <option value="paper">paper</option>
             <option value="live">live</option>
             <option value="pump">pump</option>
           </select>
-          <button className={`action-btn${tab === "status" ? " primary" : ""}`} onClick={() => setTab("status")}>
+          <button data-testid="status-tab-status" className={`action-btn${tab === "status" ? " primary" : ""}`} onClick={() => setTab("status")}>
             Status
           </button>
-          <button className={`action-btn${tab === "doctor" ? " primary" : ""}`} onClick={() => setTab("doctor")}>
+          <button data-testid="status-tab-doctor" className={`action-btn${tab === "doctor" ? " primary" : ""}`} onClick={() => setTab("doctor")}>
             Doctor
           </button>
-          <button className="action-btn" onClick={() => void load()}>
+          <button data-testid="status-refresh" className="action-btn" onClick={() => void load()}>
             Refresh
           </button>
           {role === "live" ? <StatusPill text="LIVE role selected" tone="warn" /> : null}
@@ -145,11 +178,27 @@ export default function StatusMaintenance() {
 
           <Panel title="Maintenance Actions" subtitle="Actions are queued through /api/ops/command.">
             <div className="filters-row">
-              <button className="action-btn primary" disabled={busy} onClick={() => void runMaintenance("bot", "restart")}>Restart Bot</button>
-              <button className="action-btn" disabled={busy} onClick={() => void runMaintenance("monitor", "restart")}>Restart Monitor</button>
-              <button className="action-btn" disabled={busy} onClick={() => void runMaintenance("pump", "restart")}>Restart Pump</button>
-              <button className="action-btn warn" disabled={busy} onClick={() => void runMaintenance("bot", "stop")}>Stop Bot</button>
-              <button className="action-btn good" disabled={busy} onClick={() => void runMaintenance("bot", "start")}>Start Bot</button>
+              <button data-testid="status-restart-bot" className="action-btn primary" disabled={busy} onClick={() => void runMaintenance("bot", "restart")}>Restart Bot</button>
+              <button data-testid="status-restart-monitor" className="action-btn" disabled={busy} onClick={() => void runMaintenance("monitor", "restart")}>Restart Monitor</button>
+              <button data-testid="status-restart-pump" className="action-btn" disabled={busy} onClick={() => void runMaintenance("pump", "restart")}>Restart Pump</button>
+              <button data-testid="status-stop-bot" className="action-btn warn" disabled={busy} onClick={() => void runMaintenance("bot", "stop")}>Stop Bot</button>
+              <button data-testid="status-start-bot" className="action-btn good" disabled={busy} onClick={() => void runMaintenance("bot", "start")}>Start Bot</button>
+              <button
+                data-testid="status-kill-on"
+                className="action-btn bad"
+                disabled={busy || role !== "paper"}
+                onClick={() => void setKillSwitch(true)}
+              >
+                Kill Switch ON (paper)
+              </button>
+              <button
+                data-testid="status-kill-off"
+                className="action-btn good"
+                disabled={busy || role !== "paper"}
+                onClick={() => void setKillSwitch(false)}
+              >
+                Kill Switch OFF (paper)
+              </button>
             </div>
           </Panel>
 
@@ -201,6 +250,40 @@ export default function StatusMaintenance() {
               />
             </Panel>
           </div>
+
+          <div className="grid-2">
+            <Panel title="Runtime Assertions">
+              <div className="kpi-grid">
+                <KpiCard label="Pump Entrypoint" value={pumpRuntime?.entrypoint || "—"} tone={pumpEntrypointOk ? "good" : "bad"} />
+                <KpiCard label="Pump Heartbeat (s)" value={pumpRuntime?.last_seen_seconds ?? "—"} tone={pumpRuntime?.online ? "good" : "warn"} />
+                <KpiCard label="Single DB Host" value={dbHost || "—"} tone={singleDbOk ? "good" : "warn"} />
+                <KpiCard label="Single DB Name" value={dbName || "—"} tone={singleDbOk ? "good" : "warn"} />
+              </div>
+              <div className="filters-row" style={{ marginTop: 10 }}>
+                <StatusPill text={pumpEntrypointOk ? "pump_hunter.py confirmed" : "pump entrypoint mismatch"} tone={pumpEntrypointOk ? "good" : "bad"} />
+                <StatusPill text={singleDbOk ? "single TRADING_PG_DSN confirmed" : "check DB fingerprint"} tone={singleDbOk ? "good" : "warn"} />
+              </div>
+            </Panel>
+
+            <Panel title="Runtime by Role">
+              <DataTable
+                rows={runtimeRows}
+                emptyText="No runtime rows."
+                columns={[
+                  { key: "role", title: "Role", render: (row: any) => row.role },
+                  { key: "service_name", title: "Service", render: (row: any) => row.service_name || "—" },
+                  { key: "entrypoint", title: "Entrypoint", render: (row: any) => row.entrypoint || "—" },
+                  { key: "online", title: "Online", render: (row: any) => <StatusPill text={row.online ? "ONLINE" : "OFFLINE"} tone={row.online ? "good" : "bad"} /> },
+                  { key: "last_seen_seconds", title: "Last Seen (s)", render: (row: any) => String(row.last_seen_seconds ?? "—") },
+                  { key: "last_error", title: "Last Error", render: (row: any) => row.last_error || "—" },
+                ]}
+              />
+            </Panel>
+          </div>
+
+          <Panel title="Runbook Shortcuts">
+            <pre className="code-block">bash scripts/smoke_stack.sh{"\n"}bash scripts/smoke_unified_pages.sh{"\n"}bash scripts/smoke_e2e_trade.sh{"\n"}bash scripts/smoke_ui_e2e.sh</pre>
+          </Panel>
         </>
       ) : (
         <ProjectDoctor />

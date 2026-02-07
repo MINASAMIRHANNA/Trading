@@ -158,14 +158,14 @@ export default function Learn() {
           <StatusPill text={state?.training_enabled ? "Training Enabled" : "Training Disabled"} tone={state?.training_enabled ? "good" : "warn"} />
           <span className="muted">Last training run: {state?.last_training_run || "—"}</span>
           <span className="muted">Role scope:</span>
-          <select className="dark-select" value={role} onChange={(e) => setRole(e.target.value as Role)}>
+          <select data-testid="learn-role" className="dark-select" value={role} onChange={(e) => setRole(e.target.value as Role)}>
             {ROLES.map((r) => (
               <option key={r} value={r}>
                 {r}
               </option>
             ))}
           </select>
-          <button className="action-btn" onClick={() => void load()}>
+          <button data-testid="learn-refresh" className="action-btn" onClick={() => void load()}>
             Refresh
           </button>
         </div>
@@ -173,13 +173,13 @@ export default function Learn() {
 
       <Panel title="Actions" subtitle="Manual training lifecycle controls routed only through Gateway.">
         <div className="filters-row">
-          <button className="action-btn primary" disabled={busy} onClick={() => void runTrain()}>
+          <button data-testid="learn-train" className="action-btn primary" disabled={busy} onClick={() => void runTrain()}>
             Run Training
           </button>
-          <button className="action-btn warn" disabled={busy} onClick={() => void runPromote()}>
+          <button data-testid="learn-promote" className="action-btn warn" disabled={busy} onClick={() => void runPromote()}>
             Promote Candidate
           </button>
-          <button className="action-btn bad" disabled={busy} onClick={() => void runRollback()}>
+          <button data-testid="learn-rollback" className="action-btn bad" disabled={busy} onClick={() => void runRollback()}>
             Rollback Deployed
           </button>
           {role === "live" ? <StatusPill text="LIVE role selected" tone="warn" /> : null}
@@ -218,10 +218,10 @@ export default function Learn() {
           </label>
         </div>
         <div className="filters-row" style={{ marginTop: 10 }}>
-          <button className="action-btn primary" disabled={busy} onClick={() => void saveConfig()}>
+          <button data-testid="learn-save-policy" className="action-btn primary" disabled={busy} onClick={() => void saveConfig()}>
             Save Policy
           </button>
-          <button className="action-btn" disabled={busy} onClick={() => void load()}>
+          <button data-testid="learn-refresh-policy" className="action-btn" disabled={busy} onClick={() => void load()}>
             Refresh
           </button>
         </div>

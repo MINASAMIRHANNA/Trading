@@ -107,7 +107,7 @@ export default function Alerts() {
           <StatusPill text={enabled ? "Notifications Enabled" : "Notifications Disabled"} tone={enabled ? "good" : "warn"} />
           <StatusPill text={hasToken ? "Token configured" : "Token missing"} tone={hasToken ? "good" : "bad"} />
           <label className="muted" style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-            <input type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} />
+            <input data-testid="alerts-enabled" type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} />
             enabled
           </label>
         </div>
@@ -117,11 +117,12 @@ export default function Alerts() {
         <div className="grid-2">
           <label className="muted">
             Chat ID
-            <input className="dark-input" value={chatId} onChange={(e) => setChatId(e.target.value)} />
+            <input data-testid="alerts-chat-id" className="dark-input" value={chatId} onChange={(e) => setChatId(e.target.value)} />
           </label>
           <label className="muted">
             Bot Token (leave empty to keep existing)
             <input
+              data-testid="alerts-bot-token"
               className="dark-input"
               type="password"
               value={botToken}
@@ -132,6 +133,7 @@ export default function Alerts() {
           <label className="muted" style={{ gridColumn: "1 / -1" }}>
             Patcher Integration Key (optional)
             <input
+              data-testid="alerts-patcher-key"
               className="dark-input"
               value={patcherSettingsKey}
               onChange={(e) => setPatcherSettingsKey(e.target.value)}
@@ -178,13 +180,13 @@ export default function Alerts() {
 
       <Panel title="Actions">
         <div className="filters-row">
-          <button className="action-btn primary" disabled={busy} onClick={() => void save()}>
+          <button data-testid="alerts-save" className="action-btn primary" disabled={busy} onClick={() => void save()}>
             Save Settings
           </button>
-          <button className="action-btn" disabled={busy} onClick={() => void sendTest()}>
+          <button data-testid="alerts-test" className="action-btn" disabled={busy} onClick={() => void sendTest()}>
             Send Test Message
           </button>
-          <button className="action-btn" disabled={busy} onClick={() => void load()}>
+          <button data-testid="alerts-refresh" className="action-btn" disabled={busy} onClick={() => void load()}>
             Refresh
           </button>
         </div>

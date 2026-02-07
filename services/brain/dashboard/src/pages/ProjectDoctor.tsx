@@ -135,32 +135,32 @@ export default function ProjectDoctor() {
 
       <Panel title="Actions">
         <div className="filters-row">
-          <select className="dark-select" value={role} onChange={(e) => setRole(e.target.value as any)}>
+          <select data-testid="doctor-role" className="dark-select" value={role} onChange={(e) => setRole(e.target.value as any)}>
             {ROLES.map((r) => (
               <option key={r} value={r}>
                 {r}
               </option>
             ))}
           </select>
-          <button className="action-btn primary" disabled={loading} onClick={() => void loadChecks(true)}>
+          <button data-testid="doctor-run-full" className="action-btn primary" disabled={loading} onClick={() => void loadChecks(true)}>
             Run Full Checks
           </button>
-          <button className="action-btn" disabled={loading} onClick={() => void loadChecks(false)}>
+          <button data-testid="doctor-run-quick" className="action-btn" disabled={loading} onClick={() => void loadChecks(false)}>
             Quick Checks
           </button>
-          <button className="action-btn" disabled={loading} onClick={() => void loadStatus()}>
+          <button data-testid="doctor-refresh-wiring" className="action-btn" disabled={loading} onClick={() => void loadStatus()}>
             Refresh DB Wiring
           </button>
-          <button className="action-btn" disabled={loading} onClick={() => void loadIncidents()}>
+          <button data-testid="doctor-refresh-incidents" className="action-btn" disabled={loading} onClick={() => void loadIncidents()}>
             Refresh Incidents
           </button>
-          <button className="action-btn" disabled={loading} onClick={() => void runLegacyDoctor()}>
+          <button data-testid="doctor-legacy-run" className="action-btn" disabled={loading} onClick={() => void runLegacyDoctor()}>
             Legacy Doctor Run
           </button>
-          <button className="action-btn bad" disabled={loading} onClick={() => void runClearRestart()}>
+          <button data-testid="doctor-clear-restart" className="action-btn bad" disabled={loading} onClick={() => void runClearRestart()}>
             Clear Restart Flags
           </button>
-          <button className="action-btn warn" disabled={loading} onClick={() => void runClearCommands()}>
+          <button data-testid="doctor-clear-commands" className="action-btn warn" disabled={loading} onClick={() => void runClearCommands()}>
             Clear Old Commands
           </button>
         </div>
