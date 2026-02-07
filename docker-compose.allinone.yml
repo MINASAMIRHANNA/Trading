@@ -43,6 +43,20 @@ services:
       postgres:
         condition: service_healthy
 
+  gateway_autopilot_worker:
+    build:
+      context: .
+      dockerfile: gateway/Dockerfile
+    command: python -m gateway_api.autopilot_worker
+    environment:
+      GATEWAY_URL: http://gateway_api:8200
+      GATEWAY_API_KEY: ${GATEWAY_API_KEY:-}
+      AUTOPILOT_TICK_SEC: "10"
+      AUTOPILOT_MAX_SIGNALS_PER_ROLE: "50"
+      AUTOPILOT_ROLES: "paper,live,pump"
+    depends_on:
+      - gateway_api
+
   brain_api:
     build:
       context: ./services/brain
