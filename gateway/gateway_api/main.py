@@ -29,6 +29,7 @@ from fastapi.staticfiles import StaticFiles
 
 from gateway_api.contracts_v1 import json_schema as contracts_v1_schema
 from gateway_api import mina_pg
+from gateway_api import observability as unified_observability
 
 from gateway_api.audit import ensure_audit_schema_and_table, get_dsn as _audit_get_dsn, insert_audit_event, new_trace_id, fetch_audit_events, fetch_audit_event_by_id
 from gateway_api.crypto import encrypt_json, decrypt_json, hash_secret
@@ -4204,6 +4205,26 @@ async def api_unified_overview():
         out["events"] = {"ok": False, "error": str(e)}
 
     return out
+
+
+@app.get("/api/unified/observability")
+async def api_unified_observability(roles: str | None = None):
+    role_list: list[str] = []
+    if roles:
+        for raw in str(roles).split(","):
+            role = str(raw or "").strip().lower()
+            if not role:
+                continue
+            _validate_role(role)
+            if role not in role_list:
+                role_list.append(role)
+    if not role_list:
+        role_list = ["paper", "live", "pump"]
+    return await asyncio.to_thread(
+        unified_observability.build_unified_observability,
+        AUDIT_DSN,
+        role_list,
+    )
 
 
 @app.get("/api/unified/autopilot")
