@@ -1,0 +1,291 @@
+{% extends "ui/base.html" %}
+{% block content %}
+  <div class="panel" style="margin-bottom: 16px;">
+    <div class="panel-head"><i class="fa-solid fa-rocket"></i> Go-Live Cockpit</div>
+    <div class="inline-actions" style="margin-bottom: 10px;">
+      <button class="btn btn-secondary small-btn" onclick="refreshReadiness()"><i class="fa-solid fa-rotate-right"></i> Refresh</button>
+      <span class="note">Auto refresh every 10s</span>
+    </div>
+    <div id="go-live-status" class="note">Status: -</div>
+    <div id="go-live-generated" class="note">Generated at: -</div>
+  </div>
+
+  <div class="panel" style="margin-bottom: 16px;">
+    <div class="panel-head"><i class="fa-solid fa-list-check"></i> Readiness Checks</div>
+    <div class="table-wrap">
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th>Check</th>
+            <th>OK</th>
+            <th>Detail</th>
+          </tr>
+        </thead>
+        <tbody id="readiness-checks-body"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="panel" style="margin-bottom: 16px;">
+    <div class="panel-head"><i class="fa-solid fa-wave-square"></i> Live Snapshot</div>
+    <div class="kv-grid" id="go-live-snapshot-grid"></div>
+  </div>
+
+  <div class="panel" style="margin-bottom: 16px;">
+    <div class="panel-head"><i class="fa-solid fa-shield-halved"></i> Live Control Actions</div>
+    <div class="inline-actions" style="margin-bottom: 10px;">
+      <button class="btn btn-warning small-btn" onclick="armGate()">ARM</button>
+      <button class="btn btn-blue small-btn" onclick="confirmGate()">CONFIRM</button>
+      <button class="btn btn-danger small-btn" onclick="disarmGate()">DISARM</button>
+    </div>
+    <div class="form-row">
+      <div class="input-wrap">
+        <label>Confirm Token</label>
+        <input id="go-live-token" placeholder="paste token from ARM" />
+      </div>
+      <div class="input-wrap">
+        <label>Last ARM Token</label>
+        <input id="go-live-last-token" readonly />
+      </div>
+    </div>
+  </div>
+
+  <div class="panel" style="margin-bottom: 16px;">
+    <div class="panel-head"><i class="fa-solid fa-list"></i> Symbol Allowlist</div>
+    <div class="input-wrap">
+      <label>Symbols (comma/newline separated)</label>
+      <textarea id="go-live-allowlist" rows="5" style="width:100%; background:#0b0e14; color:#fff; border:1px solid var(--border); border-radius:6px; padding:10px; font-family:'JetBrains Mono', monospace;"></textarea>
+    </div>
+    <div class="inline-actions" style="margin-top: 10px;">
+      <button class="btn btn-secondary small-btn" onclick="saveAllowlist()">Save Allowlist</button>
+    </div>
+  </div>
+
+  <div class="panel" style="margin-bottom: 16px;">
+    <div class="panel-head"><i class="fa-solid fa-sliders"></i> Live Limits</div>
+    <div class="form-row">
+      <div class="input-wrap">
+        <label>max_open_positions</label>
+        <input id="go-limit-open" type="number" min="0" step="1" />
+      </div>
+      <div class="input-wrap">
+        <label>max_notional</label>
+        <input id="go-limit-notional" type="number" min="0" step="0.01" />
+      </div>
+      <div class="input-wrap">
+        <label>max_daily_loss</label>
+        <input id="go-limit-loss" type="number" min="0" step="0.01" />
+      </div>
+    </div>
+    <div class="inline-actions" style="margin-top: 10px;">
+      <button class="btn btn-secondary small-btn" onclick="saveLimits()">Save Limits</button>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-head"><i class="fa-solid fa-triangle-exclamation"></i> Aggregation Errors (Non-Fatal)</div>
+    <pre id="go-live-errors" class="terminal-box">[]</pre>
+  </div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function escHtml(s) {
+  return String(s == null ? '' : s)
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#39;');
+}
+
+function toIso(ms) {
+  const n = Number(ms || 0);
+  if (!Number.isFinite(n) || n <= 0) return '-';
+  return new Date(n).toISOString();
+}
+
+function normSymbols(text) {
+  const arr = String(text || '').split(/[\n,]/g).map((x) => x.trim().toUpperCase()).filter(Boolean);
+  return [...new Set(arr)];
+}
+
+function readyBadge(v) {
+  return v
+    ? '<span class="badge-soft badge-ok">READY</span>'
+    : '<span class="badge-soft badge-crit">NOT READY</span>';
+}
+
+function okBadge(v) {
+  return v
+    ? '<span class="badge-soft badge-ok">OK</span>'
+    : '<span class="badge-soft badge-crit">FAIL</span>';
+}
+
+function parseBacklog(detail) {
+  const txt = String(detail || '');
+  const m = txt.match(/pending=(\d+)\s+failed=(\d+)/i);
+  if (!m) return { pending: '-', failed: '-' };
+  return { pending: m[1], failed: m[2] };
+}
+
+function renderChecks(checks) {
+  const body = document.getElementById('readiness-checks-body');
+  body.innerHTML = '';
+  const items = Array.isArray(checks) ? checks : [];
+  if (!items.length) {
+    body.innerHTML = '<tr><td colspan="3">No checks</td></tr>';
+    return;
+  }
+  items.forEach((c) => {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td>${escHtml(c.id || '-')}</td>
+      <td>${okBadge(Boolean(c.ok))}</td>
+      <td>${escHtml(c.detail || '')}</td>
+    `;
+    body.appendChild(tr);
+  });
+}
+
+function renderSnapshot(readiness) {
+  const src = (readiness && readiness.sources) || {};
+  const liveStatus = (src.live_status && typeof src.live_status === 'object') ? src.live_status : {};
+  const obs = (src.observability_live && typeof src.observability_live === 'object') ? src.observability_live : {};
+  const obsItems = Array.isArray(obs.items) ? obs.items : [];
+  const obsLive = obsItems.length ? (obsItems[0] || {}) : {};
+  const engine = (obsLive.engine && typeof obsLive.engine === 'object') ? obsLive.engine : {};
+  const lastClaim = (obsLive.last_claim && typeof obsLive.last_claim === 'object') ? obsLive.last_claim : {};
+  const lastTrade = (obsLive.last_trade && typeof obsLive.last_trade === 'object') ? obsLive.last_trade : {};
+  const dead = (src.dead_letters_live && typeof src.dead_letters_live === 'object') ? src.dead_letters_live : {};
+
+  const checks = Array.isArray(readiness.checks) ? readiness.checks : [];
+  const backlogCheck = checks.find((x) => String((x || {}).id || '') === 'command_backlog_ok') || {};
+  const backlog = parseBacklog(backlogCheck.detail);
+
+  const gate = (liveStatus.gate && typeof liveStatus.gate === 'object') ? liveStatus.gate : {};
+  const kill = (liveStatus.kill_switch && typeof liveStatus.kill_switch === 'object') ? liveStatus.kill_switch : {};
+  const allowlist = Array.isArray(liveStatus.allowlist) ? liveStatus.allowlist : [];
+  const limits = (liveStatus.limits && typeof liveStatus.limits === 'object') ? liveStatus.limits : {};
+
+  const grid = document.getElementById('go-live-snapshot-grid');
+  grid.innerHTML = `
+    <div class="kv-item"><div class="kv-label">Engine</div><div class="kv-value">${Boolean(engine.online) ? 'online' : 'offline'} (last_seen=${engine.last_seen_seconds ?? '-'})</div></div>
+    <div class="kv-item"><div class="kv-label">Gate</div><div class="kv-value">${escHtml(gate.state || '-')}</div></div>
+    <div class="kv-item"><div class="kv-label">Kill Switch</div><div class="kv-value">${Boolean(kill.enabled)} ${kill.reason ? '(' + escHtml(kill.reason) + ')' : ''}</div></div>
+    <div class="kv-item"><div class="kv-label">Allowlist / Limits</div><div class="kv-value">count=${allowlist.length} | max_open=${limits.max_open_positions ?? '-'} max_notional=${limits.max_notional ?? '-'} max_daily_loss=${limits.max_daily_loss ?? '-'}</div></div>
+    <div class="kv-item"><div class="kv-label">Last Claim</div><div class="kv-value">${lastClaim.command_id ?? '-'} / ${escHtml(lastClaim.cmd || '-')} / ${escHtml(lastClaim.status || '-')}</div></div>
+    <div class="kv-item"><div class="kv-label">Last Trade</div><div class="kv-value">${lastTrade.trade_id ?? '-'} / ${escHtml(lastTrade.symbol || '-')} / ${escHtml(lastTrade.status || '-')}</div></div>
+    <div class="kv-item"><div class="kv-label">Dead Letters</div><div class="kv-value">${dead.count ?? (Array.isArray(dead.items) ? dead.items.length : '-')}</div></div>
+    <div class="kv-item"><div class="kv-label">Backlog</div><div class="kv-value">pending=${backlog.pending} failed=${backlog.failed}</div></div>
+  `;
+
+  document.getElementById('go-live-allowlist').value = allowlist.join('\n');
+  document.getElementById('go-limit-open').value = limits.max_open_positions ?? 1;
+  document.getElementById('go-limit-notional').value = limits.max_notional ?? 50;
+  document.getElementById('go-limit-loss').value = limits.max_daily_loss ?? 10;
+}
+
+async function refreshReadiness() {
+  try {
+    const data = await fetchJson('/api/control/live/readiness');
+    document.getElementById('go-live-status').innerHTML = `Status: ${readyBadge(Boolean(data.ready))}`;
+    document.getElementById('go-live-generated').textContent = `Generated at: ${data.generated_at || '-'}`;
+    renderChecks(data.checks);
+    renderSnapshot(data);
+    document.getElementById('go-live-errors').textContent = JSON.stringify(Array.isArray(data.errors) ? data.errors : [], null, 2);
+  } catch (e) {
+    showToast(e.message || 'Failed to load live readiness', false);
+  }
+}
+
+async function armGate() {
+  try {
+    const data = await fetchJson('/api/control/live/arm', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    });
+    const token = String(data.token || '').trim();
+    if (token) {
+      document.getElementById('go-live-last-token').value = token;
+      document.getElementById('go-live-token').value = token;
+    }
+    showToast('Live gate armed');
+    await refreshReadiness();
+  } catch (e) {
+    showToast(e.message || 'ARM failed', false);
+  }
+}
+
+async function confirmGate() {
+  const token = String(document.getElementById('go-live-token').value || '').trim();
+  if (!token) {
+    showToast('Token is required', false);
+    return;
+  }
+  try {
+    await fetchJson('/api/control/live/confirm', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token }),
+    });
+    showToast('Live gate confirmed');
+    await refreshReadiness();
+  } catch (e) {
+    showToast(e.message || 'CONFIRM failed', false);
+  }
+}
+
+async function disarmGate() {
+  try {
+    await fetchJson('/api/control/live/disarm', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    });
+    showToast('Live gate disarmed');
+    await refreshReadiness();
+  } catch (e) {
+    showToast(e.message || 'DISARM failed', false);
+  }
+}
+
+async function saveAllowlist() {
+  const symbols = normSymbols(document.getElementById('go-live-allowlist').value);
+  try {
+    await fetchJson('/api/control/live/allowlist', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ symbols }),
+    });
+    showToast(`Allowlist saved (${symbols.length})`);
+    await refreshReadiness();
+  } catch (e) {
+    showToast(e.message || 'Allowlist save failed', false);
+  }
+}
+
+async function saveLimits() {
+  const payload = {
+    max_open_positions: Number(document.getElementById('go-limit-open').value || 0),
+    max_notional: Number(document.getElementById('go-limit-notional').value || 0),
+    max_daily_loss: Number(document.getElementById('go-limit-loss').value || 0),
+  };
+  try {
+    await fetchJson('/api/control/live/limits', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    showToast('Limits saved');
+    await refreshReadiness();
+  } catch (e) {
+    showToast(e.message || 'Limits save failed', false);
+  }
+}
+
+setInterval(refreshReadiness, 10000);
+refreshReadiness();
+</script>
+{% endblock %}

@@ -10416,6 +10416,12 @@ async def ui_ops_live_control(request: Request):
     return _ui_template(request, "ops_live_control.html", "Live Control")
 
 
+@app.get("/ui/ops/go-live")
+@app.get("/ui/ops/live-readiness")
+async def ui_ops_go_live(request: Request):
+    return _ui_template(request, "ops_go_live.html", "Go-Live Cockpit")
+
+
 @app.get("/ui/ops/dead-letters")
 async def ui_ops_dead_letters(request: Request):
     return _ui_template(request, "ops_dead_letters.html", "Dead Letters")
