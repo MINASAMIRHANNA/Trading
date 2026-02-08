@@ -19,12 +19,12 @@ services:
       BOT_ROLE: paper
       BOT_ID: paper-1
       BOT_VERSION: 1.0.0
-      DASHBOARD_URL: http://mina_dashboard_paper:8000
-      DASHBOARD_PUBLISH_URL: http://mina_dashboard_paper:8000/publish
+      DASHBOARD_URL: http://gateway_api:8200
+      DASHBOARD_PUBLISH_URL: http://gateway_api:8200/api/unified/paper/publish
     depends_on:
       postgres:
         condition: service_healthy
-      mina_dashboard_paper:
+      gateway_api:
         condition: service_started
     volumes:
       - ./services/mina_bot:/app
@@ -44,12 +44,12 @@ services:
       BOT_ROLE: paper
       BOT_ID: paper-1
       BOT_VERSION: 1.0.0
-      DASHBOARD_URL: http://mina_dashboard_paper:8000
-      DASHBOARD_PUBLISH_URL: http://mina_dashboard_paper:8000/publish
+      DASHBOARD_URL: http://gateway_api:8200
+      DASHBOARD_PUBLISH_URL: http://gateway_api:8200/api/unified/paper/publish
     depends_on:
       postgres:
         condition: service_healthy
-      mina_dashboard_paper:
+      gateway_api:
         condition: service_started
     volumes:
       - ./services/mina_bot:/app
@@ -69,12 +69,12 @@ services:
       BOT_ROLE: live
       BOT_ID: live-1
       BOT_VERSION: 1.0.0
-      DASHBOARD_URL: http://mina_dashboard_live:8001
-      DASHBOARD_PUBLISH_URL: http://mina_dashboard_live:8001/publish
+      DASHBOARD_URL: http://gateway_api:8200
+      DASHBOARD_PUBLISH_URL: http://gateway_api:8200/api/unified/live/publish
     depends_on:
       postgres:
         condition: service_healthy
-      mina_dashboard_live:
+      gateway_api:
         condition: service_started
     volumes:
       - ./services/mina_bot:/app
@@ -94,12 +94,12 @@ services:
       BOT_ROLE: live
       BOT_ID: live-1
       BOT_VERSION: 1.0.0
-      DASHBOARD_URL: http://mina_dashboard_live:8001
-      DASHBOARD_PUBLISH_URL: http://mina_dashboard_live:8001/publish
+      DASHBOARD_URL: http://gateway_api:8200
+      DASHBOARD_PUBLISH_URL: http://gateway_api:8200/api/unified/live/publish
     depends_on:
       postgres:
         condition: service_healthy
-      mina_dashboard_live:
+      gateway_api:
         condition: service_started
     volumes:
       - ./services/mina_bot:/app
@@ -119,13 +119,55 @@ services:
       BOT_ROLE: pump
       BOT_ID: pump-1
       BOT_VERSION: 1.0.0
-      DASHBOARD_URL: http://mina_dashboard_pump:8002
-      DASHBOARD_PUBLISH_URL: http://mina_dashboard_pump:8002/publish
+      DASHBOARD_URL: http://gateway_api:8200
+      DASHBOARD_PUBLISH_URL: http://gateway_api:8200/api/unified/pump/publish
     depends_on:
       postgres:
         condition: service_healthy
-      mina_dashboard_pump:
+      gateway_api:
         condition: service_started
     volumes:
       - ./services/mina_bot:/app
     working_dir: /app
+
+  # =========================================================
+  # Phase B skeleton services (optional profile)
+  # Start with profile:
+  #   docker compose -f docker-compose.yml -f docker-compose.bots.yml --profile phaseb up -d --build
+  # =========================================================
+
+  nautilus_engine:
+    profiles: ["phaseb"]
+    build:
+      context: ./services/nautilus_engine
+      dockerfile: Dockerfile
+    command: python -m nautilus_engine.main
+    restart: unless-stopped
+    environment:
+      TRADING_PG_DSN: postgresql://trading:trading@postgres:5432/trading
+      NAUTILUS_ROLES: paper
+      NAUTILUS_POLL_SEC: "2"
+      NAUTILUS_MODE: PAPER
+      ENGINE_ID: nautilus_engine
+      SIGNAL_SCHEMA_VERSION: v1
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  mina_strategies:
+    profiles: ["phaseb"]
+    build:
+      context: ./services/mina_strategies
+      dockerfile: Dockerfile
+    command: python -m mina_strategies.main
+    restart: unless-stopped
+    environment:
+      GATEWAY_BASE_URL: http://gateway_api:8200
+      MINA_STRATEGIES_ROLES: paper
+      MINA_STRATEGIES_SYMBOLS: BTCUSDT,ETHUSDT
+      MINA_STRATEGIES_INTERVAL_SEC: "30"
+      MINA_STRATEGIES_DRY_RUN: "0"
+      SIGNAL_SCHEMA_VERSION: v1
+    depends_on:
+      gateway_api:
+        condition: service_started

@@ -17,8 +17,8 @@ INSERT INTO mina_live.settings(key, value, updated_at, source) VALUES
   ('mode','PAPER', now()::text, 'phase3'),
   ('USE_TESTNET','TRUE', now()::text, 'phase3'),
   ('ENABLE_LIVE_TRADING','FALSE', now()::text, 'phase3'),
-  ('DASHBOARD_URL','http://mina_dashboard_live:8001', now()::text, 'phase3'),
-  ('DASHBOARD_PUBLISH_URL','http://mina_dashboard_live:8001/publish', now()::text, 'phase3')
+  ('DASHBOARD_URL','http://gateway_api:8200', now()::text, 'phase3'),
+  ('DASHBOARD_PUBLISH_URL','http://gateway_api:8200/api/unified/live/publish', now()::text, 'phase3')
 ON CONFLICT (key) DO UPDATE SET
   value=EXCLUDED.value,
   updated_at=EXCLUDED.updated_at,
@@ -28,8 +28,8 @@ INSERT INTO mina_paper.settings(key, value, updated_at, source) VALUES
   ('mode','PAPER', now()::text, 'phase3'),
   ('USE_TESTNET','TRUE', now()::text, 'phase3'),
   ('ENABLE_LIVE_TRADING','FALSE', now()::text, 'phase3'),
-  ('DASHBOARD_URL','http://mina_dashboard_paper:8000', now()::text, 'phase3'),
-  ('DASHBOARD_PUBLISH_URL','http://mina_dashboard_paper:8000/publish', now()::text, 'phase3')
+  ('DASHBOARD_URL','http://gateway_api:8200', now()::text, 'phase3'),
+  ('DASHBOARD_PUBLISH_URL','http://gateway_api:8200/api/unified/paper/publish', now()::text, 'phase3')
 ON CONFLICT (key) DO UPDATE SET
   value=EXCLUDED.value,
   updated_at=EXCLUDED.updated_at,
@@ -39,8 +39,8 @@ INSERT INTO mina_pump.settings(key, value, updated_at, source) VALUES
   ('mode','PAPER', now()::text, 'phase3'),
   ('USE_TESTNET','TRUE', now()::text, 'phase3'),
   ('ENABLE_LIVE_TRADING','FALSE', now()::text, 'phase3'),
-  ('DASHBOARD_URL','http://mina_dashboard_pump:8002', now()::text, 'phase3'),
-  ('DASHBOARD_PUBLISH_URL','http://mina_dashboard_pump:8002/publish', now()::text, 'phase3')
+  ('DASHBOARD_URL','http://gateway_api:8200', now()::text, 'phase3'),
+  ('DASHBOARD_PUBLISH_URL','http://gateway_api:8200/api/unified/pump/publish', now()::text, 'phase3')
 ON CONFLICT (key) DO UPDATE SET
   value=EXCLUDED.value,
   updated_at=EXCLUDED.updated_at,
