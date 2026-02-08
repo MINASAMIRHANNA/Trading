@@ -61,11 +61,72 @@ bash scripts/smoke_ops_ui_api.sh
 - Base: `http://localhost:8200/ui`
 - Observability: `http://localhost:8200/ui/ops/observability`
 - Live Control: `http://localhost:8200/ui/ops/live-control`
+- Go-Live Cockpit: `http://localhost:8200/ui/ops/go-live`
 - Dead Letters: `http://localhost:8200/ui/ops/dead-letters`
+- Dead Letter Detail: `http://localhost:8200/ui/ops/dead-letters/<role>/<dead_letter_id>`
 - Commands: `http://localhost:8200/ui/ops/commands`
+- Signals Inbox: `http://localhost:8200/ui/ops/signals`
+- Actions: `http://localhost:8200/ui/ops/actions`
+- Strategies: `http://localhost:8200/ui/ops/strategies`
+- Audit: `http://localhost:8200/ui/ops/audit`
 - If Gateway API key protection is enabled, UI API calls require Gateway auth:
   - either send `X-API-Key` on API requests
   - or create a browser session with `POST /api/auth/login` then use cookie-based auth
+
+## Ops Signals + Actions
+1. Open `/ui/ops/signals`, select role, filter by status/symbol, then approve/reject inbox signals.
+2. For `live` role approvals, signal execution still depends on live safety checks in engine:
+   - gate must be `CONFIRMED`
+   - allowlist and limits must pass
+   - kill-switch/live safety can still reject opens.
+3. Open `/ui/ops/actions` to enqueue `CLOSE_ALL_POSITIONS` and inspect latest commands per role.
+4. Open `/ui/ops/dead-letters/<role>/<dead_letter_id>` to inspect full dead-letter snapshot and perform safe one-time requeue.
+
+## Ops Strategies
+1. Open `/ui/ops/strategies` and select role (`paper/live/pump`).
+2. Review discovered strategy list (auto-discovered from `services/mina_strategies` code).
+3. Choose profile:
+   - `conservative` -> `min_conf=0.80`
+   - `balanced` -> `min_conf=0.65`
+   - `aggressive` -> `min_conf=0.50`
+4. Set global params (`strategy_params_global`) from the top controls.
+5. Click `Edit Params` on any strategy to set per-strategy overrides (`strategy_params_by_name`) from discovered schema fields.
+6. Toggle `strategies_enabled` and click `Apply`.
+7. For `live`, apply requires:
+   - `confirm_live_change=true`
+   - `live_confirm_ack=I_UNDERSTAND`
+   - live gate `CONFIRMED`
+   - kill-switch OFF
+
+## Go-Live Readiness
+1. Open `/ui/ops/go-live`.
+2. Confirm top status is `READY` before enabling any live rollout.
+3. Review blocking checks:
+   - `live_gate_confirmed`
+   - `kill_switch_off`
+   - `allowlist_nonempty`
+   - `limits_set`
+   - `engine_online`
+   - `dead_letters_zero`
+   - `command_backlog_ok`
+   - `observability_errors_ok`
+4. `brain_optional` may be null/unavailable and is non-blocking.
+5. Use the embedded controls on the same page for ARM/CONFIRM/DISARM, allowlist, and limits.
+
+## Ops Audit + Replay (Paper)
+1. Open `/ui/ops/audit`.
+2. Use filters (`role`, `symbol`, `since_ms`) or direct `trace_id` input.
+3. Open a trace to inspect timeline (`gateway_audit`, `events`, `commands`, `trades`).
+4. To replay safely, enable confirm checkbox and click `Replay to Paper`.
+5. Replay enqueues a new paper command with:
+   - new `trace_id`
+   - `old_trace_id` link back to source
+   - idempotent replay key to avoid duplicate replays of the same source.
+
+API equivalents:
+- `GET /api/audit/traces`
+- `GET /api/audit/trace/{trace_id}`
+- `POST /api/audit/replay/paper`
 
 ## Notes
 - Unified Dashboard is the only control plane for writes.
