@@ -35,6 +35,12 @@ CLOSING_COMMANDS = {
     "REDUCE_POSITION",
 }
 SAFE_LIVE_MODES = {"TEST", "TESTNET", "SIM", "PAPER", "SANDBOX", "SIM_OR_TESTNET"}
+LIVE_GATE_STATES = {"DISARMED", "ARMED", "CONFIRMED"}
+LIVE_LIMIT_DEFAULTS = {
+    "max_open_positions": 1,
+    "max_notional": 50.0,
+    "max_daily_loss": 10.0,
+}
 SCHEMA_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 RETRYABLE_ERROR_TOKENS = (
     "timeout",
@@ -946,37 +952,279 @@ def normalize_side(raw: Any) -> str:
     return side or "LONG"
 
 
-def _live_open_allowed(conn: psycopg.Connection, schema: str) -> tuple[bool, str, Dict[str, Any]]:
+def _set_setting_if_missing(
+    conn: psycopg.Connection, schema: str, key: str, value: Any, source: str = "nautilus_engine"
+) -> None:
+    if not table_exists(conn, schema, "settings"):
+        return
+    cols = table_columns(conn, schema, "settings")
+    if "key" not in cols or "value" not in cols:
+        return
+
+    fields = ["key", "value"]
+    vals: list[Any] = [str(key), "" if value is None else str(value)]
+    if "updated_at" in cols:
+        fields.append("updated_at")
+        vals.append(now_iso())
+    if "source" in cols:
+        fields.append("source")
+        vals.append(str(source))
+
+    placeholders = ",".join(["%s"] * len(fields))
+    with conn.cursor() as cur:
+        cur.execute(
+            f"""
+            INSERT INTO {schema}.settings ({', '.join(fields)})
+            VALUES ({placeholders})
+            ON CONFLICT (key) DO NOTHING
+            """,
+            tuple(vals),
+        )
+
+
+def ensure_live_gate_defaults(conn: psycopg.Connection, schema: str) -> None:
+    if str(schema or "").strip() != ROLE_TO_SCHEMA["live"]:
+        return
+    defaults = {
+        "live_gate_state": "DISARMED",
+        "live_gate_armed_at_ms": "",
+        "live_gate_confirmed_at_ms": "",
+        "live_gate_token": "",
+        "live_testnet_only": "1",
+        "live_allow_real_execution": "0",
+        "live_symbol_allowlist": "[]",
+        "live_limits": json.dumps(LIVE_LIMIT_DEFAULTS, ensure_ascii=True, separators=(",", ":")),
+        "live_daily_pnl_key": "",
+    }
+    for k, v in defaults.items():
+        _set_setting_if_missing(conn, schema, k, v, source="nautilus_engine.bootstrap")
+
+
+def _normalize_live_allowlist(value: Any) -> list[str]:
+    if isinstance(value, list):
+        items = value
+    elif isinstance(value, tuple):
+        items = list(value)
+    else:
+        parsed = safe_json_loads(value, None)
+        if isinstance(parsed, list):
+            items = parsed
+        else:
+            txt = str(value or "").strip()
+            items = txt.split(",") if txt else []
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in items:
+        sym = str(item or "").strip().upper()
+        if not sym or sym in seen:
+            continue
+        seen.add(sym)
+        out.append(sym)
+    return out
+
+
+def _live_limits(conn: psycopg.Connection, schema: str) -> Dict[str, Any]:
+    raw = safe_json_loads(fetch_setting(conn, schema, "live_limits", "{}"), {})
+    if not isinstance(raw, dict):
+        raw = {}
+    max_open_positions = max(
+        0,
+        safe_int(
+            raw.get("max_open_positions"),
+            safe_int(fetch_setting(conn, schema, "live_max_open_positions", LIVE_LIMIT_DEFAULTS["max_open_positions"]), int(LIVE_LIMIT_DEFAULTS["max_open_positions"])),
+        ),
+    )
+    max_notional = max(
+        0.0,
+        safe_float(
+            raw.get("max_notional"),
+            safe_float(fetch_setting(conn, schema, "live_max_notional", LIVE_LIMIT_DEFAULTS["max_notional"]), float(LIVE_LIMIT_DEFAULTS["max_notional"])),
+        ),
+    )
+    max_daily_loss = max(
+        0.0,
+        safe_float(
+            raw.get("max_daily_loss"),
+            safe_float(fetch_setting(conn, schema, "live_max_daily_loss", LIVE_LIMIT_DEFAULTS["max_daily_loss"]), float(LIVE_LIMIT_DEFAULTS["max_daily_loss"])),
+        ),
+    )
+    return {
+        "max_open_positions": int(max_open_positions),
+        "max_notional": float(max_notional),
+        "max_daily_loss": float(max_daily_loss),
+    }
+
+
+def _count_open_positions(conn: psycopg.Connection, schema: str) -> int:
+    if not table_exists(conn, schema, "trades"):
+        return 0
+    cols = table_columns(conn, schema, "trades")
+    if "status" in cols:
+        q = f"SELECT COUNT(*) AS n FROM {schema}.trades WHERE UPPER(COALESCE(status,''))='OPEN'"
+    else:
+        q = f"SELECT COUNT(*) AS n FROM {schema}.trades"
+    with conn.cursor() as cur:
+        cur.execute(q)
+        row = cur.fetchone() or {}
+    return max(0, safe_int((row or {}).get("n"), 0))
+
+
+def _daily_closed_pnl(conn: psycopg.Connection, schema: str) -> tuple[bool, float]:
+    if not table_exists(conn, schema, "trades"):
+        return False, 0.0
+    cols = table_columns(conn, schema, "trades")
+    pnl_col = "pnl" if "pnl" in cols else ("realized_pnl" if "realized_pnl" in cols else "")
+    if not pnl_col:
+        return False, 0.0
+
+    status_where = "UPPER(COALESCE(status,''))='CLOSED'" if "status" in cols else "TRUE"
+    day_start = dt.datetime.now(dt.timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    day_start_ms = int(day_start.timestamp() * 1000)
+    day_start_iso = day_start.isoformat().replace("+00:00", "Z")
+
+    numeric_ts_col = ""
+    for c in ("closed_at_ms", "updated_at_ms", "timestamp_ms"):
+        if c in cols:
+            numeric_ts_col = c
+            break
+    text_ts_col = ""
+    if not numeric_ts_col:
+        for c in ("closed_at", "updated_at", "timestamp"):
+            if c in cols:
+                text_ts_col = c
+                break
+
+    if not numeric_ts_col and not text_ts_col:
+        return False, 0.0
+
+    where_parts = [status_where]
+    params: list[Any] = []
+    if numeric_ts_col:
+        where_parts.append(f"{numeric_ts_col} >= %s")
+        params.append(day_start_ms)
+    else:
+        where_parts.append(f"{text_ts_col} >= %s")
+        params.append(day_start_iso)
+    where_sql = " AND ".join(where_parts)
+
+    with conn.cursor() as cur:
+        cur.execute(
+            f"SELECT COALESCE(SUM(COALESCE({pnl_col},0)),0) AS s FROM {schema}.trades WHERE {where_sql}",
+            tuple(params),
+        )
+        row = cur.fetchone() or {}
+    return True, safe_float((row or {}).get("s"), 0.0)
+
+
+def _extract_symbol(params: Mapping[str, Any]) -> str:
+    return str(params.get("symbol") or params.get("pair") or "").strip().upper()
+
+
+def _extract_intended_notional(params: Mapping[str, Any]) -> float:
+    notional = safe_float(
+        params.get("notional")
+        or params.get("position_notional")
+        or params.get("quote_qty")
+        or 0.0,
+        0.0,
+    )
+    if notional > 0:
+        return abs(notional)
+    qty = safe_float(params.get("quantity") or params.get("qty") or params.get("size") or 1.0, 1.0)
+    px = safe_float(params.get("entry_price") or params.get("price") or params.get("mark_price") or 0.0, 0.0)
+    if qty > 0 and px > 0:
+        return abs(qty * px)
+    return 0.0
+
+
+def _live_open_allowed(
+    conn: psycopg.Connection,
+    schema: str,
+    *,
+    cmd: str,
+    params: Mapping[str, Any],
+    execution_mode: str,
+) -> tuple[bool, str, Dict[str, Any]]:
+    ensure_live_gate_defaults(conn, schema)
+
+    gate_state = str(fetch_setting(conn, schema, "live_gate_state", "DISARMED") or "DISARMED").strip().upper()
+    if gate_state not in LIVE_GATE_STATES:
+        gate_state = "DISARMED"
+
+    testnet_only = truthy(fetch_setting(conn, schema, "live_testnet_only", "1"))
+    allow_real_execution = truthy(fetch_setting(conn, schema, "live_allow_real_execution", "0"))
     execution_enabled = (
-        truthy(fetch_setting(conn, schema, "execution_enabled", "0"))
-        or truthy(fetch_setting(conn, schema, "live_execution_enabled", "0"))
+        truthy(fetch_setting(conn, schema, "execution_enabled", "1"))
+        or truthy(fetch_setting(conn, schema, "live_execution_enabled", "1"))
         or truthy(fetch_setting(conn, schema, "ENABLE_LIVE_TRADING", "0"))
     )
 
-    mode = str(fetch_setting(conn, schema, "mode", fetch_setting(conn, schema, "RUN_MODE", "")) or "").upper()
-    testnet_flag = (
+    mode = str(fetch_setting(conn, schema, "mode", fetch_setting(conn, schema, "RUN_MODE", "")) or "").strip().upper()
+    safe_testnet = (
         truthy(fetch_setting(conn, schema, "USE_TESTNET", "0"))
         or truthy(fetch_setting(conn, schema, "use_testnet", "0"))
         or truthy(fetch_setting(conn, schema, "TESTNET", "0"))
         or truthy(fetch_setting(conn, schema, "sandbox", "0"))
         or mode in SAFE_LIVE_MODES
+        or str(execution_mode or "").strip().upper() in SAFE_LIVE_MODES
     )
+    override_live_allowed = truthy(_env("LIVE_EXECUTION_ALLOWED", "0"))
 
-    override = truthy(_env("LIVE_EXECUTION_ALLOWED", "0"))
-    allowed = bool(execution_enabled and (testnet_flag or override))
+    allowlist = _normalize_live_allowlist(fetch_setting(conn, schema, "live_symbol_allowlist", "[]"))
+    limits = _live_limits(conn, schema)
+    symbol = _extract_symbol(params)
+    intended_notional = _extract_intended_notional(params)
+    open_positions = _count_open_positions(conn, schema)
+    pnl_available, daily_realized_pnl = _daily_closed_pnl(conn, schema)
 
-    details = {
-        "execution_enabled": bool(execution_enabled),
-        "safe_testnet_or_sandbox": bool(testnet_flag),
-        "live_execution_allowed_override": bool(override),
-        "mode": mode,
+    details: Dict[str, Any] = {
+        "gate_state": gate_state,
+        "flags": {
+            "execution_enabled": bool(execution_enabled),
+            "testnet_only": bool(testnet_only),
+            "allow_real_execution": bool(allow_real_execution),
+            "live_execution_allowed_override": bool(override_live_allowed),
+            "safe_testnet_or_sandbox": bool(safe_testnet),
+            "mode": mode,
+            "execution_mode": str(execution_mode or "").strip().upper(),
+        },
+        "symbol": symbol,
+        "allowlist": allowlist,
+        "limits": limits,
+        "metrics": {
+            "open_positions": int(open_positions),
+            "intended_notional": float(intended_notional),
+            "daily_realized_pnl": float(daily_realized_pnl),
+            "daily_pnl_available": bool(pnl_available),
+        },
     }
 
+    if gate_state != "CONFIRMED":
+        return False, "LIVE_GATE_NOT_CONFIRMED", details
     if not execution_enabled:
-        return False, "live_execution_disabled", details
-    if not (testnet_flag or override):
-        return False, "live_execution_not_safe", details
-    return allowed, "ok", details
+        return False, "LIVE_EXECUTION_DISABLED", details
+    if testnet_only and not safe_testnet:
+        return False, "LIVE_TESTNET_ONLY", details
+    if not testnet_only and not safe_testnet and not (allow_real_execution and override_live_allowed):
+        return False, "LIVE_REAL_EXECUTION_NOT_ALLOWED", details
+    if allowlist and (not symbol or symbol not in allowlist):
+        return False, "SYMBOL_NOT_ALLOWED", details
+
+    max_open_positions = max(0, safe_int(limits.get("max_open_positions"), int(LIVE_LIMIT_DEFAULTS["max_open_positions"])))
+    max_notional = max(0.0, safe_float(limits.get("max_notional"), float(LIVE_LIMIT_DEFAULTS["max_notional"])))
+    max_daily_loss = max(0.0, safe_float(limits.get("max_daily_loss"), float(LIVE_LIMIT_DEFAULTS["max_daily_loss"])))
+
+    if int(open_positions) >= int(max_open_positions):
+        return False, "LIMIT_MAX_OPEN_POSITIONS", details
+    if max_notional > 0 and float(intended_notional) > float(max_notional):
+        return False, "LIMIT_MAX_NOTIONAL", details
+    if max_daily_loss > 0:
+        if not pnl_available and not truthy(_env("LIVE_ALLOW_UNKNOWN_PNL", "0")):
+            return False, "LIMIT_DAILY_PNL_UNAVAILABLE", details
+        if pnl_available and float(daily_realized_pnl) <= -abs(float(max_daily_loss)):
+            return False, "LIMIT_MAX_DAILY_LOSS", details
+
+    return True, "ok", details
 
 
 def _emit_health_heartbeat(
@@ -1062,7 +1310,13 @@ def process_command(
         return
 
     if role == "live" and is_opening_command(cmd):
-        allowed, reason, details = _live_open_allowed(conn, schema)
+        allowed, reason, details = _live_open_allowed(
+            conn,
+            schema,
+            cmd=cmd,
+            params=params,
+            execution_mode=execution_mode,
+        )
         if not allowed:
             insert_log(conn, schema, "WARN", f"live safety gate blocked opening command {cmd}: {reason}")
             append_event(
@@ -1086,7 +1340,7 @@ def process_command(
                 schema,
                 command_id,
                 status="REJECTED",
-                ack_meta={"ok": False, "blocked": reason, "cmd": cmd, "details": details},
+                ack_meta={"ok": False, "blocked": reason, "cmd": cmd, "live_guard": details},
                 last_error=reason,
             )
             return
@@ -1339,10 +1593,11 @@ def run_loop() -> None:
     )
 
     try:
-        with connect() as conn:
-            for _, schema in role_targets:
-                ensure_schema_tables(conn, schema)
-                ensure_consumer_schema(conn, schema)
+            with connect() as conn:
+                for _, schema in role_targets:
+                    ensure_schema_tables(conn, schema)
+                    ensure_consumer_schema(conn, schema)
+                    ensure_live_gate_defaults(conn, schema)
     except Exception as exc:
         print(f"[nautilus_engine] schema ensure error: {type(exc).__name__}: {exc}")
 
