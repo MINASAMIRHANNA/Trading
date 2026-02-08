@@ -4,9 +4,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-# Tail all engine/pump services
+# Tail all nautilus engine services
 exec docker compose -f docker-compose.yml -f docker-compose.bots.yml logs -f --tail=120 \
   nautilus_paper_engine \
   nautilus_live_engine \
-  mina_pump_bot \
-  mina_pump_monitor
+  nautilus_pump_engine
