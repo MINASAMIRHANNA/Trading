@@ -3,6 +3,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import os
+import random
 import re
 import time
 import uuid
@@ -35,6 +36,16 @@ CLOSING_COMMANDS = {
 }
 SAFE_LIVE_MODES = {"TEST", "TESTNET", "SIM", "PAPER", "SANDBOX", "SIM_OR_TESTNET"}
 SCHEMA_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+RETRYABLE_ERROR_TOKENS = (
+    "timeout",
+    "timed out",
+    "temporar",
+    "connection",
+    "reset by peer",
+    "deadlock",
+    "could not serialize",
+    "too many connections",
+)
 
 
 def _env(name: str, default: str = "") -> str:
@@ -235,6 +246,51 @@ def ensure_schema_tables(conn: psycopg.Connection, schema: str) -> None:
         )
 
 
+def ensure_consumer_schema(conn: psycopg.Connection, schema: str) -> None:
+    if not table_exists(conn, schema, "commands"):
+        return
+
+    with conn.cursor() as cur:
+        cur.execute(f"ALTER TABLE {schema}.commands ADD COLUMN IF NOT EXISTS attempt_count INTEGER NOT NULL DEFAULT 0")
+        cur.execute(f"ALTER TABLE {schema}.commands ADD COLUMN IF NOT EXISTS max_attempts INTEGER NOT NULL DEFAULT 5")
+        cur.execute(f"ALTER TABLE {schema}.commands ADD COLUMN IF NOT EXISTS next_retry_at_ms BIGINT NULL")
+        cur.execute(f"ALTER TABLE {schema}.commands ADD COLUMN IF NOT EXISTS last_error TEXT NULL")
+        cur.execute(f"ALTER TABLE {schema}.commands ADD COLUMN IF NOT EXISTS last_error_at_ms BIGINT NULL")
+        cur.execute(f"ALTER TABLE {schema}.commands ADD COLUMN IF NOT EXISTS dead_lettered BOOLEAN NOT NULL DEFAULT FALSE")
+
+        cur.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS {schema}.command_dead_letters (
+                id BIGSERIAL PRIMARY KEY,
+                command_id BIGINT NOT NULL,
+                cmd TEXT,
+                params JSONB,
+                status TEXT,
+                attempt_count INT,
+                max_attempts INT,
+                claimed_by TEXT,
+                created_at_ms BIGINT,
+                failed_at_ms BIGINT,
+                last_error TEXT,
+                inserted_at_ms BIGINT NOT NULL
+            )
+            """
+        )
+
+        cur.execute(
+            f"""
+            CREATE INDEX IF NOT EXISTS commands_status_next_retry_idx
+            ON {schema}.commands(status, next_retry_at_ms)
+            """
+        )
+        cur.execute(
+            f"""
+            CREATE INDEX IF NOT EXISTS command_dead_letters_command_id_idx
+            ON {schema}.command_dead_letters(command_id)
+            """
+        )
+
+
 def fetch_setting(conn: psycopg.Connection, schema: str, key: str, default: str = "") -> str:
     if not table_exists(conn, schema, "settings"):
         return default
@@ -422,17 +478,43 @@ def claim_next_pending_command(conn: psycopg.Connection, schema: str, worker_id:
         return None
 
     set_parts: list[str] = ["status = %s"]
-    vals: list[Any] = ["CLAIMED"]
+    set_vals: list[Any] = ["CLAIMED"]
 
     if "claimed_by" in cols:
         set_parts.append("claimed_by = %s")
-        vals.append(worker_id)
+        set_vals.append(worker_id)
     if "claimed_at" in cols:
         set_parts.append("claimed_at = %s")
-        vals.append(now_iso())
+        set_vals.append(now_iso())
     if "claimed_at_ms" in cols:
         set_parts.append("claimed_at_ms = %s")
-        vals.append(now_ms())
+        set_vals.append(now_ms())
+    if "next_retry_at_ms" in cols:
+        set_parts.append("next_retry_at_ms = NULL")
+
+    where_parts: list[str] = []
+    pick_vals: list[Any] = []
+    if "status" in cols:
+        where_parts.append("UPPER(COALESCE(status,'')) IN ('PENDING','FAILED')")
+    if "next_retry_at_ms" in cols:
+        where_parts.append("(next_retry_at_ms IS NULL OR next_retry_at_ms <= %s)")
+        pick_vals.append(now_ms())
+    if "dead_lettered" in cols:
+        where_parts.append("COALESCE(dead_lettered, FALSE) = FALSE")
+
+    where_sql = " AND ".join(where_parts) if where_parts else "TRUE"
+    order_parts: list[str] = []
+    if "cmd" in cols:
+        order_parts.append(
+            "CASE "
+            "WHEN UPPER(COALESCE(cmd,'')) = 'CLOSE_ALL_POSITIONS' THEN 0 "
+            "WHEN UPPER(COALESCE(cmd,'')) LIKE 'CLOSE_%' THEN 1 "
+            "WHEN UPPER(COALESCE(cmd,'')) LIKE 'REDUCE_%' THEN 1 "
+            "WHEN UPPER(COALESCE(cmd,'')) = 'EXECUTE_SIGNAL' THEN 3 "
+            "ELSE 2 END"
+        )
+    order_parts.append("id ASC")
+    order_sql = ", ".join(order_parts)
 
     with conn.cursor() as cur:
         cur.execute(
@@ -440,8 +522,8 @@ def claim_next_pending_command(conn: psycopg.Connection, schema: str, worker_id:
             WITH picked AS (
                 SELECT id
                 FROM {schema}.commands
-                WHERE UPPER(COALESCE(status,'')) = 'PENDING'
-                ORDER BY id ASC
+                WHERE {where_sql}
+                ORDER BY {order_sql}
                 LIMIT 1
                 FOR UPDATE SKIP LOCKED
             )
@@ -449,10 +531,10 @@ def claim_next_pending_command(conn: psycopg.Connection, schema: str, worker_id:
             SET {', '.join(set_parts)}
             FROM picked
             WHERE c.id = picked.id
-              AND UPPER(COALESCE(c.status,'')) = 'PENDING'
+              AND UPPER(COALESCE(c.status,'')) IN ('PENDING','FAILED')
             RETURNING c.*
             """,
-            tuple(vals),
+            tuple(pick_vals + set_vals),
         )
         row = cur.fetchone() or {}
     return dict(row) if row else None
@@ -479,7 +561,7 @@ def mark_command(
         updates.append("status = %s")
         vals.append(status_upper)
 
-    if status_upper in {"DONE", "REJECTED", "FAILED"}:
+    if status_upper in {"DONE", "REJECTED", "FAILED", "DEAD"}:
         if "done_at" in cols:
             updates.append("done_at = %s")
             vals.append(now_iso())
@@ -501,6 +583,172 @@ def mark_command(
     vals.append(int(command_id))
     with conn.cursor() as cur:
         cur.execute(f"UPDATE {schema}.commands SET {', '.join(updates)} WHERE id = %s", tuple(vals))
+
+
+def _backoff_ms(attempt_count: int) -> int:
+    base_ms = max(250, safe_int(_env("NAUTILUS_RETRY_BASE_MS", "1000"), 1000))
+    cap_ms = max(base_ms, safe_int(_env("NAUTILUS_RETRY_CAP_MS", "60000"), 60000))
+    jitter_ms = max(0, safe_int(_env("NAUTILUS_RETRY_JITTER_MS", "250"), 250))
+    exp_ms = base_ms * (2 ** max(0, int(attempt_count) - 1))
+    wait_ms = min(cap_ms, exp_ms)
+    if jitter_ms > 0:
+        wait_ms = min(cap_ms, wait_ms + random.randint(0, jitter_ms))
+    return int(wait_ms)
+
+
+def _is_transient_error(exc: Exception) -> bool:
+    if isinstance(exc, (TimeoutError, ConnectionError, psycopg.OperationalError, psycopg.InterfaceError)):
+        return True
+    msg = str(exc or "").strip().lower()
+    return any(token in msg for token in RETRYABLE_ERROR_TOKENS)
+
+
+def _insert_dead_letter(
+    conn: psycopg.Connection,
+    schema: str,
+    *,
+    cmd_row: Mapping[str, Any],
+    status: str,
+    attempt_count: int,
+    max_attempts: int,
+    failed_at_ms: int,
+    last_error: str,
+) -> None:
+    if not table_exists(conn, schema, "command_dead_letters"):
+        return
+    cols = table_columns(conn, schema, "command_dead_letters")
+    fields: list[str] = []
+    vals: list[Any] = []
+
+    cmd_params = safe_json_loads(cmd_row.get("params"), {})
+    if not isinstance(cmd_params, (dict, list)):
+        cmd_params = {}
+
+    def add(col: str, val: Any) -> None:
+        if col in cols:
+            fields.append(col)
+            vals.append(val)
+
+    add("command_id", safe_int(cmd_row.get("id"), 0))
+    add("cmd", str(cmd_row.get("cmd") or ""))
+    add("params", json.dumps(cmd_params, ensure_ascii=True, default=str))
+    add("status", str(status or "DEAD"))
+    add("attempt_count", int(attempt_count))
+    add("max_attempts", int(max_attempts))
+    add("claimed_by", str(cmd_row.get("claimed_by") or ""))
+    add("created_at_ms", safe_int(cmd_row.get("created_at_ms"), 0))
+    add("failed_at_ms", int(failed_at_ms))
+    add("last_error", str(last_error or ""))
+    add("inserted_at_ms", now_ms())
+
+    if not fields:
+        return
+
+    placeholders = ",".join(["%s"] * len(fields))
+    with conn.cursor() as cur:
+        cur.execute(
+            f"INSERT INTO {schema}.command_dead_letters ({', '.join(fields)}) VALUES ({placeholders})",
+            tuple(vals),
+        )
+
+
+def schedule_retry_or_dead_letter(
+    conn: psycopg.Connection,
+    schema: str,
+    *,
+    cmd_row: Mapping[str, Any],
+    exc: Exception,
+) -> str:
+    if not table_exists(conn, schema, "commands"):
+        return "FAILED"
+    cols = table_columns(conn, schema, "commands")
+    command_id = safe_int(cmd_row.get("id"), 0)
+    if command_id <= 0:
+        return "FAILED"
+
+    old_attempt = max(0, safe_int(cmd_row.get("attempt_count"), 0))
+    max_attempts = max(1, safe_int(cmd_row.get("max_attempts"), 5))
+    next_attempt = old_attempt + 1
+    err_text = f"{type(exc).__name__}: {exc}"
+    transient = _is_transient_error(exc)
+    retryable = True
+    terminal = (not retryable) or (next_attempt >= max_attempts)
+
+    updates: list[str] = []
+    vals: list[Any] = []
+
+    def set_col(col: str, value: Any, expr: str = "%s") -> None:
+        if col in cols:
+            updates.append(f"{col} = {expr}")
+            if expr == "%s":
+                vals.append(value)
+
+    retry_at_ms = 0
+    if terminal:
+        set_col("status", "DEAD")
+        set_col("dead_lettered", True)
+        set_col("next_retry_at_ms", None)
+        set_col("attempt_count", next_attempt)
+        set_col("max_attempts", max_attempts)
+        set_col("last_error", err_text)
+        set_col("last_error_at_ms", now_ms())
+        if "done_at" in cols:
+            set_col("done_at", now_iso())
+        if "done_at_ms" in cols:
+            set_col("done_at_ms", now_ms())
+    else:
+        retry_at_ms = now_ms() + _backoff_ms(next_attempt)
+        set_col("status", "FAILED")
+        set_col("dead_lettered", False)
+        set_col("next_retry_at_ms", retry_at_ms)
+        set_col("attempt_count", next_attempt)
+        set_col("max_attempts", max_attempts)
+        set_col("last_error", err_text)
+        set_col("last_error_at_ms", now_ms())
+        if "done_at" in cols:
+            set_col("done_at", None)
+        if "done_at_ms" in cols:
+            set_col("done_at_ms", None)
+
+    if not updates:
+        return "FAILED"
+
+    vals.append(command_id)
+    with conn.cursor() as cur:
+        cur.execute(f"UPDATE {schema}.commands SET {', '.join(updates)} WHERE id = %s", tuple(vals))
+
+    if terminal:
+        _insert_dead_letter(
+            conn,
+            schema,
+            cmd_row=cmd_row,
+            status="DEAD",
+            attempt_count=next_attempt,
+            max_attempts=max_attempts,
+            failed_at_ms=now_ms(),
+            last_error=err_text,
+        )
+        insert_log(
+            conn,
+            schema,
+            "ERROR",
+            (
+                f"dead-lettered command id={command_id} cmd={cmd_row.get('cmd')} "
+                f"attempt={next_attempt}/{max_attempts} transient={transient}"
+            ),
+        )
+        return "DEAD"
+
+    insert_log(
+        conn,
+        schema,
+        "WARN",
+        (
+            f"command retry scheduled id={command_id} cmd={cmd_row.get('cmd')} "
+            f"attempt={next_attempt}/{max_attempts} transient={transient} next_retry_at_ms={retry_at_ms}"
+        ),
+    )
+    return "FAILED"
 
 
 def insert_open_trade(
@@ -934,6 +1182,23 @@ def process_command(
         )
         return
 
+    if cmd == "TEST_FAIL_ONCE":
+        prior_attempts = safe_int(cmd_row.get("attempt_count"), 0)
+        if prior_attempts < 1:
+            raise RuntimeError("synthetic_transient_fail_once")
+        insert_log(conn, schema, "INFO", f"TEST_FAIL_ONCE recovered after attempt_count={prior_attempts}")
+        mark_command(
+            conn,
+            schema,
+            command_id,
+            status="DONE",
+            ack_meta={"ok": True, "test": "TEST_FAIL_ONCE", "attempt_count": prior_attempts},
+        )
+        return
+
+    if cmd == "TEST_ALWAYS_FAIL":
+        raise RuntimeError("synthetic_always_fail")
+
     insert_log(conn, schema, "INFO", f"ignored command {cmd}")
     mark_command(conn, schema, command_id, status="DONE", ack_meta={"ok": True, "ignored": True, "cmd": cmd})
 
@@ -958,6 +1223,14 @@ def run_loop() -> None:
         f"[nautilus_engine] start execution_mode={execution_mode} targets={role_targets} poll={poll_sec}s heartbeat={hb_sec}s"
     )
 
+    try:
+        with connect() as conn:
+            for _, schema in role_targets:
+                ensure_schema_tables(conn, schema)
+                ensure_consumer_schema(conn, schema)
+    except Exception as exc:
+        print(f"[nautilus_engine] schema ensure error: {type(exc).__name__}: {exc}")
+
     last_hb_ms: Dict[str, int] = {}
 
     while True:
@@ -966,8 +1239,6 @@ def run_loop() -> None:
             with connect() as conn:
                 loop_now_ms = now_ms()
                 for role, schema in role_targets:
-                    ensure_schema_tables(conn, schema)
-
                     hb_key = f"{role}:{schema}"
                     if loop_now_ms - safe_int(last_hb_ms.get(hb_key), 0) >= hb_sec * 1000:
                         _emit_health_heartbeat(
@@ -989,16 +1260,8 @@ def run_loop() -> None:
                             process_command(conn, role, schema, cmd_row, execution_mode=execution_mode)
                         except Exception as exc:
                             cid = safe_int((cmd_row or {}).get("id"), 0)
-                            insert_log(conn, schema, "ERROR", f"command failed id={cid}: {type(exc).__name__}: {exc}")
                             if cid > 0:
-                                mark_command(
-                                    conn,
-                                    schema,
-                                    cid,
-                                    status="FAILED",
-                                    ack_meta={"ok": False, "error": str(exc)},
-                                    last_error=str(exc),
-                                )
+                                schedule_retry_or_dead_letter(conn, schema, cmd_row=cmd_row, exc=exc)
         except Exception as exc:
             print(f"[nautilus_engine] loop error: {type(exc).__name__}: {exc}")
 
