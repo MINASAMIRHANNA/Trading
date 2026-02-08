@@ -124,6 +124,29 @@ Observed DB evidence:
 Result:
 - PASS
 
+### Kill-switch safety assertion
+Commands run (summarized):
+```bash
+curl -sS -X POST http://localhost:8200/api/unified/paper/commands/kill_switch \
+  -H 'Content-Type: application/json' \
+  -d '{"enabled":true,"reason":"qa-kill-switch-check"}'
+
+curl -sS -X POST http://localhost:8200/api/manual/execute \
+  -H 'Content-Type: application/json' \
+  -d '{"role":"paper","symbol":"BTCUSDT","amount_usd":25,"market":"futures","direction":"LONG"}'
+
+curl -sS -X POST http://localhost:8200/api/unified/paper/commands/close_all \
+  -H 'Content-Type: application/json' \
+  -d '{"reason":"qa-kill-switch-check"}'
+```
+
+Observed behavior:
+- Open attempt (`manual execute`) returned a strategy/risk veto containing `kill_switch_on`.
+- Close command (`CLOSE_ALL_POSITIONS`) was accepted and queued successfully.
+
+Result:
+- PASS (matches required safety behavior: block opens, allow closes)
+
 ## E) UI-facing Validation (human-like fallback)
 
 ### Attempted automated UI build script
