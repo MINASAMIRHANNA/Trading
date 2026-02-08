@@ -519,8 +519,8 @@ def claim_next_pending_command(conn: psycopg.Connection, schema: str, worker_id:
         order_parts.append(
             "CASE "
             "WHEN UPPER(COALESCE(cmd,'')) = 'CLOSE_ALL_POSITIONS' THEN 0 "
-            "WHEN UPPER(COALESCE(cmd,'')) LIKE 'CLOSE_%' THEN 1 "
-            "WHEN UPPER(COALESCE(cmd,'')) LIKE 'REDUCE_%' THEN 1 "
+            "WHEN UPPER(COALESCE(cmd,'')) LIKE 'CLOSE_%%' THEN 1 "
+            "WHEN UPPER(COALESCE(cmd,'')) LIKE 'REDUCE_%%' THEN 1 "
             "WHEN UPPER(COALESCE(cmd,'')) = 'EXECUTE_SIGNAL' THEN 3 "
             "ELSE 2 END"
         )
