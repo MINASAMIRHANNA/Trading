@@ -8,6 +8,7 @@ import time
 import math
 import hmac
 import hashlib
+import secrets
 import csv
 import io
 import datetime as dt
@@ -598,6 +599,7 @@ async def _startup():
         await asyncio.to_thread(_ensure_gateway_phase4_tables, AUDIT_DSN)
         await asyncio.to_thread(_ensure_strategy_risk_tables)
         await asyncio.to_thread(_ensure_live_policy_defaults)
+        await asyncio.to_thread(_ensure_live_gate_defaults)
         await asyncio.to_thread(_ensure_default_alert_rules)
         await asyncio.to_thread(
             _register_service_row,
@@ -1086,6 +1088,12 @@ LIVE_POLICY_KEYS = {
 }
 
 LIVE_ROLLOUT_STAGES = ("LIVE-0", "LIVE-1", "LIVE-2")
+LIVE_GATE_STATES = ("DISARMED", "ARMED", "CONFIRMED")
+LIVE_LIMITS_MAX = {
+    "max_open_positions": 1000,
+    "max_notional": 1_000_000_000.0,
+    "max_daily_loss": 1_000_000_000.0,
+}
 LIVE_OPENING_COMMANDS = {
     "EXECUTE_SIGNAL",
     "OPEN_TRADE",
@@ -1715,6 +1723,179 @@ def _set_setting(schema: str, key: str, value: str, source: str = "gateway") -> 
     with psycopg.connect(AUDIT_DSN, autocommit=True) as conn:
         with conn.cursor() as cur:
             cur.execute(q, vals)
+
+
+def _live_gate_default_limits() -> Dict[str, Any]:
+    return {
+        "max_open_positions": 1,
+        "max_notional": 50.0,
+        "max_daily_loss": 10.0,
+    }
+
+
+def _live_gate_default_settings() -> Dict[str, str]:
+    return {
+        "live_gate_state": "DISARMED",
+        "live_gate_armed_at_ms": "",
+        "live_gate_confirmed_at_ms": "",
+        "live_gate_token": "",
+        "live_testnet_only": "1",
+        "live_allow_real_execution": "0",
+        "live_symbol_allowlist": "[]",
+        "live_limits": json.dumps(_live_gate_default_limits(), ensure_ascii=True, separators=(",", ":")),
+        "live_daily_pnl_key": "",
+    }
+
+
+def _set_setting_if_missing(schema: str, key: str, value: str, source: str = "gateway") -> None:
+    if not _table_exists(schema, "settings"):
+        return
+    cols = _table_columns(schema, "settings")
+    if "key" not in cols or "value" not in cols:
+        return
+
+    fields = ["key", "value"]
+    vals: list[Any] = [str(key), "" if value is None else str(value)]
+    if "updated_at" in cols:
+        fields.append("updated_at")
+        vals.append(_utc_iso_now())
+    if "source" in cols:
+        fields.append("source")
+        vals.append(source)
+
+    placeholders = ",".join(["%s"] * len(fields))
+    q = f"""
+    INSERT INTO {schema}.settings ({', '.join(fields)})
+    VALUES ({placeholders})
+    ON CONFLICT (key) DO NOTHING
+    """
+    with psycopg.connect(AUDIT_DSN, autocommit=True) as conn:
+        with conn.cursor() as cur:
+            cur.execute(q, vals)
+
+
+def _ensure_live_gate_defaults() -> None:
+    schema = _schema_for_role("live")
+    defaults = _live_gate_default_settings()
+    for key, value in defaults.items():
+        _set_setting_if_missing(schema, key, value, source="gateway.live_gate.bootstrap")
+
+
+def _normalize_live_allowlist(value: Any) -> list[str]:
+    raw_items: list[Any]
+    if isinstance(value, list):
+        raw_items = list(value)
+    elif isinstance(value, tuple):
+        raw_items = list(value)
+    elif value is None:
+        raw_items = []
+    else:
+        parsed = _safe_json_loads(value, None)
+        if isinstance(parsed, list):
+            raw_items = parsed
+        else:
+            txt = str(value or "").strip()
+            raw_items = txt.split(",") if txt else []
+
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in raw_items:
+        sym = str(item or "").strip().upper()
+        if not sym or sym in seen:
+            continue
+        seen.add(sym)
+        out.append(sym)
+    return out
+
+
+def _normalize_live_limits(value: Any) -> Dict[str, Any]:
+    defaults = _live_gate_default_limits()
+    data = _safe_json_loads(value, {}) if value is not None else {}
+    if not isinstance(data, dict):
+        data = {}
+
+    max_open_positions = max(0, _as_int(data.get("max_open_positions"), int(defaults["max_open_positions"])))
+    max_notional = max(0.0, _as_float(data.get("max_notional"), float(defaults["max_notional"])))
+    max_daily_loss = max(0.0, _as_float(data.get("max_daily_loss"), float(defaults["max_daily_loss"])))
+
+    max_open_positions = min(max_open_positions, int(LIVE_LIMITS_MAX["max_open_positions"]))
+    max_notional = min(max_notional, float(LIVE_LIMITS_MAX["max_notional"]))
+    max_daily_loss = min(max_daily_loss, float(LIVE_LIMITS_MAX["max_daily_loss"]))
+
+    return {
+        "max_open_positions": int(max_open_positions),
+        "max_notional": float(max_notional),
+        "max_daily_loss": float(max_daily_loss),
+    }
+
+
+def _as_optional_ms(value: Any) -> int | None:
+    if value in (None, ""):
+        return None
+    try:
+        iv = int(float(value))
+        return iv if iv > 0 else None
+    except Exception:
+        return None
+
+
+def _live_gate_status(*, include_token: bool = False) -> Dict[str, Any]:
+    schema = _schema_for_role("live")
+    _ensure_live_gate_defaults()
+    keys = [
+        "live_gate_state",
+        "live_gate_armed_at_ms",
+        "live_gate_confirmed_at_ms",
+        "live_gate_token",
+        "live_testnet_only",
+        "live_allow_real_execution",
+        "live_symbol_allowlist",
+        "live_limits",
+        "live_daily_pnl_key",
+        "kill_switch",
+        "kill_switch_reason",
+        "execution_enabled",
+        "live_execution_enabled",
+        "mode",
+        "RUN_MODE",
+        "USE_TESTNET",
+        "use_testnet",
+    ]
+    raw = _fetch_settings(schema, keys)
+
+    gate_state = str(raw.get("live_gate_state") or "DISARMED").strip().upper()
+    if gate_state not in LIVE_GATE_STATES:
+        gate_state = "DISARMED"
+
+    token = str(raw.get("live_gate_token") or "")
+    mode = str(raw.get("mode") or raw.get("RUN_MODE") or "").strip().upper()
+    use_testnet = _as_bool(raw.get("USE_TESTNET"), False) or _as_bool(raw.get("use_testnet"), False) or mode in {"TEST", "TESTNET", "SIM", "PAPER", "SANDBOX"}
+
+    return {
+        "role": "live",
+        "schema": schema,
+        "gate": {
+            "state": gate_state,
+            "armed_at_ms": _as_optional_ms(raw.get("live_gate_armed_at_ms")),
+            "confirmed_at_ms": _as_optional_ms(raw.get("live_gate_confirmed_at_ms")),
+            "token": token if include_token else None,
+            "token_present": bool(token),
+        },
+        "flags": {
+            "testnet_only": _as_bool(raw.get("live_testnet_only"), True),
+            "allow_real_execution": _as_bool(raw.get("live_allow_real_execution"), False),
+            "execution_enabled": _as_bool(raw.get("execution_enabled"), False) or _as_bool(raw.get("live_execution_enabled"), False),
+            "mode": mode,
+            "use_testnet": bool(use_testnet),
+        },
+        "allowlist": _normalize_live_allowlist(raw.get("live_symbol_allowlist")),
+        "limits": _normalize_live_limits(raw.get("live_limits")),
+        "kill_switch": {
+            "enabled": _as_bool(raw.get("kill_switch"), False),
+            "reason": str(raw.get("kill_switch_reason") or ""),
+        },
+        "daily_pnl_key": str(raw.get("live_daily_pnl_key") or ""),
+    }
 
 
 def _safe_ts_value(row: Dict[str, Any], cols: set[str], candidates: list[str]) -> Any:
@@ -3096,8 +3277,6 @@ def _queue_role_command(
     request_payload: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     cmd_upper = str(cmd).strip().upper()
-    if str(role or "").lower() == "live":
-        _enforce_live_opening_policy(cmd_upper, params or {})
     schema = _schema_for_role(role)
     command_id = _insert_mina_command(schema, cmd=cmd_upper, params=params or {}, trace_id=trace_id)
     queue_row = _insert_command_queue(
@@ -5509,6 +5688,225 @@ async def api_live_rollout_set(request: Request):
         pass
 
     return await api_live_rollout_get()
+
+
+@app.get("/api/control/live/status")
+async def api_control_live_status():
+    return {"ok": True, **_live_gate_status(include_token=False)}
+
+
+@app.post("/api/control/live/arm")
+async def api_control_live_arm(request: Request):
+    try:
+        body = await request.json()
+        if not isinstance(body, dict):
+            body = {}
+    except Exception:
+        body = {}
+
+    trace_id = _trace_id_from_request(request)
+    schema = _schema_for_role("live")
+    _ensure_live_gate_defaults()
+    armed_at_ms = _ms_now()
+    token = secrets.token_urlsafe(9)
+    _set_setting(schema, "live_gate_state", "ARMED", source="gateway.control.live.arm")
+    _set_setting(schema, "live_gate_armed_at_ms", str(armed_at_ms), source="gateway.control.live.arm")
+    _set_setting(schema, "live_gate_confirmed_at_ms", "", source="gateway.control.live.arm")
+    _set_setting(schema, "live_gate_token", token, source="gateway.control.live.arm")
+    status = _live_gate_status(include_token=False)
+
+    await _audit_write(
+        request=request,
+        action="CONTROL_LIVE_ARM",
+        role="live",
+        target_id="live_gate",
+        trace_id=trace_id,
+        request_json=body,
+        response_json={"ok": True, "state": "ARMED", "armed_at_ms": armed_at_ms},
+        ok=True,
+    )
+    return {"ok": True, "trace_id": trace_id, "token": token, **status}
+
+
+@app.post("/api/control/live/confirm")
+async def api_control_live_confirm(request: Request):
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Body must be an object")
+
+    token = str(body.get("token") or "").strip()
+    if not token:
+        raise HTTPException(status_code=400, detail="token is required")
+
+    trace_id = _trace_id_from_request(request)
+    schema = _schema_for_role("live")
+    status_before = _live_gate_status(include_token=True)
+    gate = dict(status_before.get("gate") or {})
+    state = str(gate.get("state") or "DISARMED").upper()
+    expected_token = str(gate.get("token") or "")
+
+    if state != "ARMED":
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "LIVE_GATE_NOT_ARMED",
+                "message": "live gate must be ARMED before confirmation",
+                "state": state,
+            },
+        )
+    if not expected_token or not hmac.compare_digest(token, expected_token):
+        raise HTTPException(
+            status_code=400,
+            detail={"error": "LIVE_GATE_TOKEN_INVALID", "message": "invalid live gate token"},
+        )
+
+    confirmed_at_ms = _ms_now()
+    _set_setting(schema, "live_gate_state", "CONFIRMED", source="gateway.control.live.confirm")
+    _set_setting(schema, "live_gate_confirmed_at_ms", str(confirmed_at_ms), source="gateway.control.live.confirm")
+    status = _live_gate_status(include_token=False)
+
+    await _audit_write(
+        request=request,
+        action="CONTROL_LIVE_CONFIRM",
+        role="live",
+        target_id="live_gate",
+        trace_id=trace_id,
+        request_json={"token_provided": bool(token)},
+        response_json={"ok": True, "state": "CONFIRMED", "confirmed_at_ms": confirmed_at_ms},
+        ok=True,
+    )
+    return {"ok": True, "trace_id": trace_id, **status}
+
+
+@app.post("/api/control/live/disarm")
+async def api_control_live_disarm(request: Request):
+    try:
+        body = await request.json()
+        if not isinstance(body, dict):
+            body = {}
+    except Exception:
+        body = {}
+
+    trace_id = _trace_id_from_request(request)
+    schema = _schema_for_role("live")
+    _set_setting(schema, "live_gate_state", "DISARMED", source="gateway.control.live.disarm")
+    _set_setting(schema, "live_gate_armed_at_ms", "", source="gateway.control.live.disarm")
+    _set_setting(schema, "live_gate_confirmed_at_ms", "", source="gateway.control.live.disarm")
+    _set_setting(schema, "live_gate_token", "", source="gateway.control.live.disarm")
+    status = _live_gate_status(include_token=False)
+
+    await _audit_write(
+        request=request,
+        action="CONTROL_LIVE_DISARM",
+        role="live",
+        target_id="live_gate",
+        trace_id=trace_id,
+        request_json=body,
+        response_json={"ok": True, "state": "DISARMED"},
+        ok=True,
+    )
+    return {"ok": True, "trace_id": trace_id, **status}
+
+
+@app.post("/api/control/live/allowlist")
+async def api_control_live_allowlist(request: Request):
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Body must be an object")
+
+    if "symbols" not in body:
+        raise HTTPException(status_code=400, detail="symbols is required")
+    symbols = _normalize_live_allowlist(body.get("symbols"))
+
+    trace_id = _trace_id_from_request(request)
+    schema = _schema_for_role("live")
+    _set_setting(
+        schema,
+        "live_symbol_allowlist",
+        json.dumps(symbols, ensure_ascii=True, separators=(",", ":")),
+        source="gateway.control.live.allowlist",
+    )
+    status = _live_gate_status(include_token=False)
+
+    await _audit_write(
+        request=request,
+        action="CONTROL_LIVE_ALLOWLIST",
+        role="live",
+        target_id="live_symbol_allowlist",
+        trace_id=trace_id,
+        request_json={"symbols": symbols},
+        response_json={"ok": True, "count": len(symbols)},
+        ok=True,
+    )
+    return {"ok": True, "trace_id": trace_id, **status}
+
+
+@app.post("/api/control/live/limits")
+async def api_control_live_limits(request: Request):
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Body must be an object")
+
+    current = _normalize_live_limits((_live_gate_status(include_token=False).get("limits") or {}))
+    updated = dict(current)
+
+    if "max_open_positions" in body:
+        try:
+            v = int(float(body.get("max_open_positions")))
+        except Exception:
+            raise HTTPException(status_code=400, detail="max_open_positions must be numeric")
+        if v < 0 or v > int(LIVE_LIMITS_MAX["max_open_positions"]):
+            raise HTTPException(status_code=400, detail=f"max_open_positions must be between 0 and {int(LIVE_LIMITS_MAX['max_open_positions'])}")
+        updated["max_open_positions"] = int(v)
+
+    if "max_notional" in body:
+        try:
+            v = float(body.get("max_notional"))
+        except Exception:
+            raise HTTPException(status_code=400, detail="max_notional must be numeric")
+        if v < 0 or v > float(LIVE_LIMITS_MAX["max_notional"]):
+            raise HTTPException(status_code=400, detail=f"max_notional must be between 0 and {float(LIVE_LIMITS_MAX['max_notional'])}")
+        updated["max_notional"] = float(v)
+
+    if "max_daily_loss" in body:
+        try:
+            v = float(body.get("max_daily_loss"))
+        except Exception:
+            raise HTTPException(status_code=400, detail="max_daily_loss must be numeric")
+        if v < 0 or v > float(LIVE_LIMITS_MAX["max_daily_loss"]):
+            raise HTTPException(status_code=400, detail=f"max_daily_loss must be between 0 and {float(LIVE_LIMITS_MAX['max_daily_loss'])}")
+        updated["max_daily_loss"] = float(v)
+
+    trace_id = _trace_id_from_request(request)
+    schema = _schema_for_role("live")
+    _set_setting(
+        schema,
+        "live_limits",
+        json.dumps(updated, ensure_ascii=True, separators=(",", ":")),
+        source="gateway.control.live.limits",
+    )
+    status = _live_gate_status(include_token=False)
+
+    await _audit_write(
+        request=request,
+        action="CONTROL_LIVE_LIMITS",
+        role="live",
+        target_id="live_limits",
+        trace_id=trace_id,
+        request_json=body,
+        response_json={"ok": True, "limits": updated},
+        ok=True,
+    )
+    return {"ok": True, "trace_id": trace_id, **status}
 
 
 def _strategies_payload(role: str = "all") -> Dict[str, Any]:
