@@ -14,10 +14,10 @@ docker compose -f docker-compose.yml -f docker-compose.bots.yml up -d --build \
 echo "== docker compose ps (bots + monitors) =="
 docker compose -f docker-compose.yml -f docker-compose.bots.yml ps
 
-echo "== dashboards /api/db_ready (sanity) =="
-(curl -sS http://localhost:8001/api/db_ready || true); echo
-(curl -sS http://localhost:8000/api/db_ready || true); echo
-(curl -sS http://localhost:8002/api/db_ready || true); echo
+echo "== Gateway unified system_health (sanity) =="
+(curl -sS http://localhost:8200/api/unified/paper/system_health || true); echo
+(curl -sS http://localhost:8200/api/unified/live/system_health || true); echo
+(curl -sS http://localhost:8200/api/unified/pump/system_health || true); echo
 
 echo "== tail logs (example) =="
 echo "  docker compose -f docker-compose.yml -f docker-compose.bots.yml logs -f --tail=120 mina_live_bot"

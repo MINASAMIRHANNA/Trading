@@ -24,10 +24,10 @@ printf '%s\n' "${OV}"
 
 echo "== Try queue CLOSE_ALL_POSITIONS (${ROLE}) =="
 BODY='{"cmd":"CLOSE_ALL_POSITIONS","params":{"reason":"smoke_test","ts_utc":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"}}'
-RESP="$(curl_capture -X POST "${BASE}/api/unified/${ROLE}/commands" "${HDR[@]}" -H "Content-Type: application/json" -d "${BODY}" || true)"
+RESP="$(curl_capture "${BASE}/api/unified/${ROLE}/commands" -X POST "${HDR[@]}" -H "Content-Type: application/json" -d "${BODY}" || true)"
 if [[ "${CURL_LAST_CODE}" == "404" ]]; then
   # Fallback: proxy to dashboard
-  RESP="$(curl_capture -X POST "${BASE}/api/mina/${ROLE}/api/commands/queue" "${HDR[@]}" -H "Content-Type: application/json" -d "${BODY}" || true)"
+  RESP="$(curl_capture "${BASE}/api/mina/${ROLE}/api/commands/queue" -X POST "${HDR[@]}" -H "Content-Type: application/json" -d "${BODY}" || true)"
 fi
 printf '%s\n' "${RESP}"
 

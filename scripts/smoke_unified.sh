@@ -31,8 +31,8 @@ SIG_JSON=$(curl -sS "$GW_BASE/api/unified/$ROLE/signals?limit=10")
 echo "$SIG_JSON" | show_json
 
 if [ "$JQ" = "jq" ]; then
-  APPROVE_ID=$(echo "$SIG_JSON" | jq -r '.[] | select(.status=="RECEIVED" or .status=="PENDING" or .status=="PENDING_APPROVAL") | .id' | head -n1)
-  REJECT_ID=$(echo "$SIG_JSON" | jq -r '.[] | select(.status=="RECEIVED" or .status=="PENDING" or .status=="PENDING_APPROVAL") | .id' | tail -n1)
+  APPROVE_ID=$(echo "$SIG_JSON" | jq -r '((if type=="array" then . else (.items // []) end)[] | select(.status=="RECEIVED" or .status=="PENDING" or .status=="PENDING_APPROVAL") | .id)' | head -n1)
+  REJECT_ID=$(echo "$SIG_JSON" | jq -r '((if type=="array" then . else (.items // []) end)[] | select(.status=="RECEIVED" or .status=="PENDING" or .status=="PENDING_APPROVAL") | .id)' | tail -n1)
 
   if [ -n "$APPROVE_ID" ] && [ "$APPROVE_ID" != "null" ]; then
     echo "== Approve Signal #$APPROVE_ID =="

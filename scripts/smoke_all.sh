@@ -35,12 +35,17 @@ echo
 echo "== Try approve first signal (if any) =="
 FIRST_ID=""
 if command -v jq >/dev/null 2>&1; then
-  FIRST_ID="$(cat "${SIGS}" | jq -r 'if type=="array" and length>0 then .[0].id else empty end' 2>/dev/null || true)"
+  FIRST_ID="$(cat "${SIGS}" | jq -r 'if type=="array" and length>0 then .[0].id elif (type=="object" and (.items|type=="array") and (.items|length>0)) then .items[0].id else empty end' 2>/dev/null || true)"
 else
   FIRST_ID="$(cat "${SIGS}" | python3 -c 'import sys,json
 try:
   d=json.load(sys.stdin)
-  print(d[0].get("id","") if isinstance(d,list) and d else "")
+  if isinstance(d,list) and d:
+    print(d[0].get("id","") or "")
+  elif isinstance(d,dict) and isinstance(d.get("items"),list) and d.get("items"):
+    print((d["items"][0] or {}).get("id","") or "")
+  else:
+    print("")
 except Exception:
   pass' 2>/dev/null || true)"
 fi

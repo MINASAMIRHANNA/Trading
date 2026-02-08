@@ -33,6 +33,8 @@ try:
     data = json.load(sys.stdin)
     if isinstance(data, list) and data:
         print(data[0].get('id','') or '')
+    elif isinstance(data, dict) and isinstance(data.get('items'), list) and data.get('items'):
+        print((data['items'][0] or {}).get('id','') or '')
 except Exception:
     print('')
 PY

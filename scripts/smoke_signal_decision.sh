@@ -27,6 +27,8 @@ try:
     d=json.load(sys.stdin)
     if isinstance(d,list) and d:
         print(d[0].get('id','') or '')
+    elif isinstance(d,dict) and isinstance(d.get('items'),list) and d.get('items'):
+        print((d['items'][0] or {}).get('id','') or '')
 except Exception:
     print('')
 PY
