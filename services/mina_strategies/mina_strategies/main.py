@@ -106,7 +106,8 @@ def publish_signal(base_url: str, role: str, payload: Mapping[str, Any], api_key
 def run_loop() -> None:
     base_url = _env("GATEWAY_BASE_URL", "http://gateway_api:8200")
     api_key = _env("GATEWAY_API_KEY", "")
-    roles = [r.lower() for r in _split_csv(_env("MINA_STRATEGIES_ROLES", "paper"))]
+    roles_raw = _env("ROLE_TARGETS", _env("MINA_STRATEGIES_ROLES", "paper"))
+    roles = [r.lower() for r in _split_csv(roles_raw)]
     roles = [r for r in roles if r in {"paper", "live", "pump"}]
     if not roles:
         roles = ["paper"]
