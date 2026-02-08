@@ -1,110 +1,53 @@
 services:
   # =========================================================
-  # Phase 3: Mina bots + monitors (Postgres PRIMARY)
-  # Start with:
-  #   docker compose -f docker-compose.yml -f docker-compose.bots.yml up -d --build
+  # Phase C: Execution ownership cutover
+  # - paper/live: nautilus engines (single consumer per role)
+  # - pump: legacy mina bot + monitor
   # =========================================================
 
-  mina_paper_monitor:
+  nautilus_paper_engine:
     build:
-      context: ./services/mina_bot
+      context: ./services/nautilus_engine
       dockerfile: Dockerfile
-    command: python execution_monitor.py
+    command: python -m nautilus_engine.main
     restart: unless-stopped
     environment:
-      MINA_DB_BACKEND: postgres
       TRADING_PG_DSN: postgresql://trading:trading@postgres:5432/trading
-      TRADING_PG_MIRROR: "1"
-      TRADING_PG_SCHEMA: mina_paper
-      BOT_ROLE: paper
-      BOT_ID: paper-1
-      BOT_VERSION: 1.0.0
-      DASHBOARD_URL: http://gateway_api:8200
-      DASHBOARD_PUBLISH_URL: http://gateway_api:8200/api/unified/paper/publish
+      ROLE: paper
+      DB_SCHEMA: mina_paper
+      EXECUTION_MODE: SIM
+      NAUTILUS_POLL_SEC: "2"
+      ENGINE_ID: nautilus_paper_engine
+      LIVE_EXECUTION_ALLOWED: "0"
+      SIGNAL_SCHEMA_VERSION: v1
     depends_on:
       postgres:
         condition: service_healthy
       gateway_api:
         condition: service_started
-    volumes:
-      - ./services/mina_bot:/app
-    working_dir: /app
 
-  mina_paper_bot:
+  nautilus_live_engine:
     build:
-      context: ./services/mina_bot
+      context: ./services/nautilus_engine
       dockerfile: Dockerfile
-    command: python services/paper_bot/main.py
+    command: python -m nautilus_engine.main
     restart: unless-stopped
     environment:
-      MINA_DB_BACKEND: postgres
       TRADING_PG_DSN: postgresql://trading:trading@postgres:5432/trading
-      TRADING_PG_MIRROR: "1"
-      TRADING_PG_SCHEMA: mina_paper
-      BOT_ROLE: paper
-      BOT_ID: paper-1
-      BOT_VERSION: 1.0.0
-      DASHBOARD_URL: http://gateway_api:8200
-      DASHBOARD_PUBLISH_URL: http://gateway_api:8200/api/unified/paper/publish
+      ROLE: live
+      DB_SCHEMA: mina_live
+      EXECUTION_MODE: SIM_OR_TESTNET
+      NAUTILUS_POLL_SEC: "2"
+      ENGINE_ID: nautilus_live_engine
+      LIVE_EXECUTION_ALLOWED: ${LIVE_EXECUTION_ALLOWED:-0}
+      SIGNAL_SCHEMA_VERSION: v1
     depends_on:
       postgres:
         condition: service_healthy
       gateway_api:
         condition: service_started
-    volumes:
-      - ./services/mina_bot:/app
-    working_dir: /app
 
-  mina_live_monitor:
-    build:
-      context: ./services/mina_bot
-      dockerfile: Dockerfile
-    command: python execution_monitor.py
-    restart: unless-stopped
-    environment:
-      MINA_DB_BACKEND: postgres
-      TRADING_PG_DSN: postgresql://trading:trading@postgres:5432/trading
-      TRADING_PG_MIRROR: "1"
-      TRADING_PG_SCHEMA: mina_live
-      BOT_ROLE: live
-      BOT_ID: live-1
-      BOT_VERSION: 1.0.0
-      DASHBOARD_URL: http://gateway_api:8200
-      DASHBOARD_PUBLISH_URL: http://gateway_api:8200/api/unified/live/publish
-    depends_on:
-      postgres:
-        condition: service_healthy
-      gateway_api:
-        condition: service_started
-    volumes:
-      - ./services/mina_bot:/app
-    working_dir: /app
-
-  mina_live_bot:
-    build:
-      context: ./services/mina_bot
-      dockerfile: Dockerfile
-    command: python services/live_bot/main.py
-    restart: unless-stopped
-    environment:
-      MINA_DB_BACKEND: postgres
-      TRADING_PG_DSN: postgresql://trading:trading@postgres:5432/trading
-      TRADING_PG_MIRROR: "1"
-      TRADING_PG_SCHEMA: mina_live
-      BOT_ROLE: live
-      BOT_ID: live-1
-      BOT_VERSION: 1.0.0
-      DASHBOARD_URL: http://gateway_api:8200
-      DASHBOARD_PUBLISH_URL: http://gateway_api:8200/api/unified/live/publish
-    depends_on:
-      postgres:
-        condition: service_healthy
-      gateway_api:
-        condition: service_started
-    volumes:
-      - ./services/mina_bot:/app
-    working_dir: /app
-
+  # Pump role remains legacy for now.
   mina_pump_bot:
     build:
       context: ./services/mina_bot
@@ -130,30 +73,32 @@ services:
       - ./services/mina_bot:/app
     working_dir: /app
 
-  # =========================================================
-  # Phase B skeleton services (optional profile)
-  # Start with profile:
-  #   docker compose -f docker-compose.yml -f docker-compose.bots.yml --profile phaseb up -d --build
-  # =========================================================
-
-  nautilus_engine:
-    profiles: ["phaseb"]
+  mina_pump_monitor:
     build:
-      context: ./services/nautilus_engine
+      context: ./services/mina_bot
       dockerfile: Dockerfile
-    command: python -m nautilus_engine.main
+    command: python execution_monitor.py
     restart: unless-stopped
     environment:
+      MINA_DB_BACKEND: postgres
       TRADING_PG_DSN: postgresql://trading:trading@postgres:5432/trading
-      NAUTILUS_ROLES: paper
-      NAUTILUS_POLL_SEC: "2"
-      NAUTILUS_MODE: PAPER
-      ENGINE_ID: nautilus_engine
-      SIGNAL_SCHEMA_VERSION: v1
+      TRADING_PG_MIRROR: "1"
+      TRADING_PG_SCHEMA: mina_pump
+      BOT_ROLE: pump
+      BOT_ID: pump-1
+      BOT_VERSION: 1.0.0
+      DASHBOARD_URL: http://gateway_api:8200
+      DASHBOARD_PUBLISH_URL: http://gateway_api:8200/api/unified/pump/publish
     depends_on:
       postgres:
         condition: service_healthy
+      gateway_api:
+        condition: service_started
+    volumes:
+      - ./services/mina_bot:/app
+    working_dir: /app
 
+  # Optional strategy publisher (signal generation only; no execution).
   mina_strategies:
     profiles: ["phaseb"]
     build:
@@ -163,7 +108,7 @@ services:
     restart: unless-stopped
     environment:
       GATEWAY_BASE_URL: http://gateway_api:8200
-      MINA_STRATEGIES_ROLES: paper
+      ROLE_TARGETS: ${MINA_STRATEGIES_ROLE_TARGETS:-paper}
       MINA_STRATEGIES_SYMBOLS: BTCUSDT,ETHUSDT
       MINA_STRATEGIES_INTERVAL_SEC: "30"
       MINA_STRATEGIES_DRY_RUN: "0"
