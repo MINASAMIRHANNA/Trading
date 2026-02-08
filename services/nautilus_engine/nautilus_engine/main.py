@@ -290,6 +290,17 @@ def ensure_consumer_schema(conn: psycopg.Connection, schema: str) -> None:
             """
         )
 
+    if table_exists(conn, schema, "trades"):
+        with conn.cursor() as cur:
+            cur.execute(f"ALTER TABLE {schema}.trades ADD COLUMN IF NOT EXISTS signal_inbox_id BIGINT NULL")
+            cur.execute(
+                f"""
+                CREATE UNIQUE INDEX IF NOT EXISTS trades_unique_signal_inbox_id
+                ON {schema}.trades(signal_inbox_id)
+                WHERE signal_inbox_id IS NOT NULL
+                """
+            )
+
 
 def fetch_setting(conn: psycopg.Connection, schema: str, key: str, default: str = "") -> str:
     if not table_exists(conn, schema, "settings"):
@@ -751,19 +762,43 @@ def schedule_retry_or_dead_letter(
     return "FAILED"
 
 
+def find_trade_by_signal_inbox_id(conn: psycopg.Connection, schema: str, signal_inbox_id: int) -> int:
+    if signal_inbox_id <= 0:
+        return 0
+    if not table_exists(conn, schema, "trades"):
+        return 0
+    cols = table_columns(conn, schema, "trades")
+    if "id" not in cols or "signal_inbox_id" not in cols:
+        return 0
+    with conn.cursor() as cur:
+        cur.execute(
+            f"""
+            SELECT id
+            FROM {schema}.trades
+            WHERE signal_inbox_id = %s
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (int(signal_inbox_id),),
+        )
+        row = cur.fetchone() or {}
+        return safe_int(row.get("id"), 0)
+
+
 def insert_open_trade(
     conn: psycopg.Connection,
     schema: str,
     *,
     symbol: str,
     side: str,
+    signal_inbox_id: int,
     params: Mapping[str, Any],
     trace_id: str,
     decision_id: str,
     schema_version: str,
-) -> int:
+) -> tuple[int, bool]:
     if not table_exists(conn, schema, "trades"):
-        return 0
+        return 0, False
 
     cols = table_columns(conn, schema, "trades")
     entry = safe_float(params.get("entry_price") or params.get("price") or params.get("mark_price") or 0.0, 0.0)
@@ -795,22 +830,33 @@ def insert_open_trade(
     add("trace_id", trace_id)
     add("decision_id", decision_id)
     add("schema_version", schema_version)
+    if signal_inbox_id > 0:
+        add("signal_inbox_id", int(signal_inbox_id))
 
     if not fields:
-        return 0
+        return 0, False
 
     placeholders = ",".join(["%s"] * len(fields))
+    use_conflict_safe_insert = signal_inbox_id > 0 and "signal_inbox_id" in cols
     with conn.cursor() as cur:
         if "id" in cols:
-            cur.execute(
-                f"INSERT INTO {schema}.trades ({', '.join(fields)}) VALUES ({placeholders}) RETURNING id",
-                tuple(vals),
-            )
+            sql = f"INSERT INTO {schema}.trades ({', '.join(fields)}) VALUES ({placeholders})"
+            if use_conflict_safe_insert:
+                sql += " ON CONFLICT DO NOTHING"
+            sql += " RETURNING id"
+            cur.execute(sql, tuple(vals))
             row = cur.fetchone() or {}
-            return safe_int(row.get("id"), 0)
+            trade_id = safe_int(row.get("id"), 0)
+            if trade_id > 0:
+                return trade_id, True
+            if use_conflict_safe_insert:
+                existing_id = find_trade_by_signal_inbox_id(conn, schema, signal_inbox_id)
+                if existing_id > 0:
+                    return existing_id, False
+            return 0, False
 
         cur.execute(f"INSERT INTO {schema}.trades ({', '.join(fields)}) VALUES ({placeholders})", tuple(vals))
-    return 0
+    return 0, True
 
 
 def close_trade_by_id(conn: psycopg.Connection, schema: str, trade_id: int, reason: str) -> bool:
@@ -1048,16 +1094,78 @@ def process_command(
     if cmd == "EXECUTE_SIGNAL":
         symbol = str(params.get("symbol") or params.get("pair") or "").strip().upper() or "UNKNOWN"
         side = normalize_side(params.get("side") or params.get("signal") or params.get("direction"))
-        trade_id = insert_open_trade(
+        signal_inbox_id = safe_int(
+            params.get("signal_inbox_id")
+            or params.get("signal_id")
+            or params.get("inbox_id")
+            or params.get("_dashboard_signal_id"),
+            0,
+        )
+
+        existing_trade_id = find_trade_by_signal_inbox_id(conn, schema, signal_inbox_id) if signal_inbox_id > 0 else 0
+        if existing_trade_id > 0:
+            insert_log(
+                conn,
+                schema,
+                "INFO",
+                (
+                    f"idempotent EXECUTE_SIGNAL noop signal_inbox_id={signal_inbox_id} "
+                    f"existing_trade_id={existing_trade_id}"
+                ),
+            )
+            mark_command(
+                conn,
+                schema,
+                command_id,
+                status="DONE",
+                ack_meta={
+                    "ok": True,
+                    "simulated": True,
+                    "idempotent": True,
+                    "signal_inbox_id": signal_inbox_id,
+                    "trade_id": existing_trade_id,
+                    "cmd": cmd,
+                },
+            )
+            return
+
+        trade_id, inserted_new = insert_open_trade(
             conn,
             schema,
             symbol=symbol,
             side=side,
+            signal_inbox_id=signal_inbox_id,
             params=params,
             trace_id=trace_id,
             decision_id=decision_id,
             schema_version=schema_version,
         )
+
+        if not inserted_new and signal_inbox_id > 0 and trade_id > 0:
+            insert_log(
+                conn,
+                schema,
+                "INFO",
+                (
+                    f"idempotent EXECUTE_SIGNAL conflict noop signal_inbox_id={signal_inbox_id} "
+                    f"existing_trade_id={trade_id}"
+                ),
+            )
+            mark_command(
+                conn,
+                schema,
+                command_id,
+                status="DONE",
+                ack_meta={
+                    "ok": True,
+                    "simulated": True,
+                    "idempotent": True,
+                    "signal_inbox_id": signal_inbox_id,
+                    "trade_id": trade_id,
+                    "cmd": cmd,
+                },
+            )
+            return
 
         insert_log(conn, schema, "INFO", f"simulated EXECUTE_SIGNAL -> trade_id={trade_id} {symbol} {side}")
         evt_payload = {
@@ -1065,6 +1173,7 @@ def process_command(
             "command": cmd,
             "command_id": command_id,
             "trade_id": trade_id,
+            "signal_inbox_id": signal_inbox_id if signal_inbox_id > 0 else None,
             "symbol": symbol,
             "side": side,
             "execution_mode": execution_mode,
@@ -1094,7 +1203,13 @@ def process_command(
             schema,
             command_id,
             status="DONE",
-            ack_meta={"ok": True, "simulated": True, "trade_id": trade_id, "cmd": cmd},
+            ack_meta={
+                "ok": True,
+                "simulated": True,
+                "trade_id": trade_id,
+                "signal_inbox_id": (signal_inbox_id if signal_inbox_id > 0 else None),
+                "cmd": cmd,
+            },
         )
         return
 
