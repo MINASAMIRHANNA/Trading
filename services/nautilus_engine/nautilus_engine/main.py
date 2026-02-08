@@ -3,9 +3,10 @@ from __future__ import annotations
 import datetime as dt
 import json
 import os
+import re
 import time
 import uuid
-from typing import Any, Dict, Iterable, Mapping
+from typing import Any, Dict, Mapping
 
 import psycopg
 from psycopg.rows import dict_row
@@ -32,6 +33,8 @@ CLOSING_COMMANDS = {
     "CLOSE_POSITION",
     "REDUCE_POSITION",
 }
+SAFE_LIVE_MODES = {"TEST", "TESTNET", "SIM", "PAPER", "SANDBOX", "SIM_OR_TESTNET"}
+SCHEMA_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 def _env(name: str, default: str = "") -> str:
@@ -50,6 +53,13 @@ def _normalize_dsn(raw: str) -> str:
     if txt.startswith("postgresql+psycopg2://"):
         txt = "postgresql://" + txt[len("postgresql+psycopg2://") :]
     return txt
+
+
+def _validate_schema_name(schema: str) -> str:
+    out = str(schema or "").strip()
+    if not SCHEMA_RE.fullmatch(out):
+        raise ValueError(f"invalid schema name: {schema!r}")
+    return out
 
 
 def now_iso() -> str:
@@ -97,6 +107,32 @@ def role_to_schema(role: str) -> str:
     if key not in ROLE_TO_SCHEMA:
         raise ValueError(f"unknown role: {role!r}")
     return ROLE_TO_SCHEMA[key]
+
+
+def resolve_role_schemas() -> list[tuple[str, str]]:
+    # Preferred Phase C inputs.
+    role_raw = _env("ROLE", _env("NAUTILUS_ROLE", "")).strip().lower()
+    schema_raw = _env("DB_SCHEMA", "").strip()
+
+    if role_raw:
+        if role_raw not in ROLE_TO_SCHEMA:
+            raise ValueError(f"ROLE must be one of: {', '.join(sorted(ROLE_TO_SCHEMA))}")
+        schema = _validate_schema_name(schema_raw) if schema_raw else role_to_schema(role_raw)
+        return [(role_raw, schema)]
+
+    # Backward-compatible fallback.
+    raw_roles = [x.strip().lower() for x in _env("NAUTILUS_ROLES", "paper").split(",") if x.strip()]
+    roles = [r for r in raw_roles if r in ROLE_TO_SCHEMA]
+    if not roles:
+        roles = ["paper"]
+
+    if schema_raw:
+        schema = _validate_schema_name(schema_raw)
+        if len(roles) != 1:
+            raise ValueError("DB_SCHEMA override requires exactly one role")
+        return [(roles[0], schema)]
+
+    return [(r, role_to_schema(r)) for r in roles]
 
 
 def connect() -> psycopg.Connection:
@@ -212,6 +248,40 @@ def fetch_setting(conn: psycopg.Connection, schema: str, key: str, default: str 
     return default if val is None else str(val)
 
 
+def set_setting(conn: psycopg.Connection, schema: str, key: str, value: Any, source: str = "nautilus_engine") -> None:
+    if not table_exists(conn, schema, "settings"):
+        return
+    cols = table_columns(conn, schema, "settings")
+    if "key" not in cols or "value" not in cols:
+        return
+
+    fields = ["key", "value"]
+    vals: list[Any] = [str(key), "" if value is None else str(value)]
+    updates = ["value = EXCLUDED.value"]
+
+    if "updated_at" in cols:
+        fields.append("updated_at")
+        vals.append(now_iso())
+        updates.append("updated_at = EXCLUDED.updated_at")
+    if "source" in cols:
+        fields.append("source")
+        vals.append(str(source))
+        updates.append("source = EXCLUDED.source")
+    if "version" in cols:
+        updates.append(f"version = COALESCE({schema}.settings.version, 0) + 1")
+
+    placeholders = ",".join(["%s"] * len(fields))
+    with conn.cursor() as cur:
+        cur.execute(
+            f"""
+            INSERT INTO {schema}.settings ({', '.join(fields)})
+            VALUES ({placeholders})
+            ON CONFLICT (key) DO UPDATE SET {', '.join(updates)}
+            """,
+            tuple(vals),
+        )
+
+
 def insert_log(conn: psycopg.Connection, schema: str, level: str, msg: str, source: str = "nautilus_engine") -> None:
     if not table_exists(conn, schema, "logs"):
         return
@@ -241,26 +311,26 @@ def insert_log(conn: psycopg.Connection, schema: str, level: str, msg: str, sour
         cur.execute(f"INSERT INTO {schema}.logs ({', '.join(fields)}) VALUES ({placeholders})", tuple(vals))
 
 
-def append_event(
+def _append_event_like(
     conn: psycopg.Connection,
     schema: str,
     *,
+    table: str,
     role: str,
-    action: str,
+    event_type: str,
     payload: Mapping[str, Any],
     trace_id: str,
     decision_id: str,
     schema_version: str,
 ) -> None:
-    if not table_exists(conn, schema, "events"):
+    if not table_exists(conn, schema, table):
         return
-    cols = table_columns(conn, schema, "events")
+    cols = table_columns(conn, schema, table)
 
     event_payload = {
         "schema_version": schema_version,
         "trace_id": trace_id,
         "decision_id": decision_id,
-        "action": action,
         **dict(payload or {}),
     }
 
@@ -272,8 +342,8 @@ def append_event(
             fields.append(col)
             vals.append(val)
 
-    add("event_type", "TradeEvent")
-    add("type", "TradeEvent")
+    add("event_type", event_type)
+    add("type", event_type)
     add("payload_json", json.dumps(event_payload, ensure_ascii=True, default=str))
     add("payload", json.dumps(event_payload, ensure_ascii=True, default=str))
     add("data", json.dumps(event_payload, ensure_ascii=True, default=str))
@@ -292,103 +362,100 @@ def append_event(
 
     placeholders = ",".join(["%s"] * len(fields))
     with conn.cursor() as cur:
-        cur.execute(f"INSERT INTO {schema}.events ({', '.join(fields)}) VALUES ({placeholders})", tuple(vals))
+        cur.execute(f"INSERT INTO {schema}.{table} ({', '.join(fields)}) VALUES ({placeholders})", tuple(vals))
+
+
+def append_event(
+    conn: psycopg.Connection,
+    schema: str,
+    *,
+    role: str,
+    event_type: str,
+    payload: Mapping[str, Any],
+    trace_id: str,
+    decision_id: str,
+    schema_version: str,
+) -> None:
+    _append_event_like(
+        conn,
+        schema,
+        table="events",
+        role=role,
+        event_type=event_type,
+        payload=payload,
+        trace_id=trace_id,
+        decision_id=decision_id,
+        schema_version=schema_version,
+    )
 
 
 def append_trade_event(
     conn: psycopg.Connection,
     schema: str,
     *,
-    action: str,
+    role: str,
+    event_type: str,
     payload: Mapping[str, Any],
     trace_id: str,
     decision_id: str,
     schema_version: str,
 ) -> None:
-    if not table_exists(conn, schema, "trade_events"):
-        return
-    cols = table_columns(conn, schema, "trade_events")
-
-    event_payload = {
-        "schema_version": schema_version,
-        "trace_id": trace_id,
-        "decision_id": decision_id,
-        "action": action,
-        **dict(payload or {}),
-    }
-
-    fields: list[str] = []
-    vals: list[Any] = []
-
-    def add(col: str, val: Any) -> None:
-        if col in cols:
-            fields.append(col)
-            vals.append(val)
-
-    add("event_type", "TradeEvent")
-    add("payload_json", json.dumps(event_payload, ensure_ascii=True, default=str))
-    add("source", "nautilus_engine")
-    add("created_at", now_iso())
-    add("created_at_ms", now_ms())
-    add("trace_id", trace_id)
-    add("decision_id", decision_id)
-    add("schema_version", schema_version)
-
-    if not fields:
-        return
-
-    placeholders = ",".join(["%s"] * len(fields))
-    with conn.cursor() as cur:
-        cur.execute(f"INSERT INTO {schema}.trade_events ({', '.join(fields)}) VALUES ({placeholders})", tuple(vals))
+    _append_event_like(
+        conn,
+        schema,
+        table="trade_events",
+        role=role,
+        event_type=event_type,
+        payload=payload,
+        trace_id=trace_id,
+        decision_id=decision_id,
+        schema_version=schema_version,
+    )
 
 
 def claim_next_pending_command(conn: psycopg.Connection, schema: str, worker_id: str) -> dict | None:
     if not table_exists(conn, schema, "commands"):
         return None
     cols = table_columns(conn, schema, "commands")
-    if "id" not in cols or "cmd" not in cols:
+    required = {"id", "cmd", "status"}
+    if not required.issubset(cols):
         return None
+
+    set_parts: list[str] = ["status = %s"]
+    vals: list[Any] = ["CLAIMED"]
+
+    if "claimed_by" in cols:
+        set_parts.append("claimed_by = %s")
+        vals.append(worker_id)
+    if "claimed_at" in cols:
+        set_parts.append("claimed_at = %s")
+        vals.append(now_iso())
+    if "claimed_at_ms" in cols:
+        set_parts.append("claimed_at_ms = %s")
+        vals.append(now_ms())
 
     with conn.cursor() as cur:
-        if "status" in cols:
-            cur.execute(
-                f"SELECT * FROM {schema}.commands WHERE UPPER(COALESCE(status,'')) = 'PENDING' ORDER BY id ASC LIMIT 1"
+        cur.execute(
+            f"""
+            WITH picked AS (
+                SELECT id
+                FROM {schema}.commands
+                WHERE UPPER(COALESCE(status,'')) = 'PENDING'
+                ORDER BY id ASC
+                LIMIT 1
+                FOR UPDATE SKIP LOCKED
             )
-        else:
-            cur.execute(f"SELECT * FROM {schema}.commands ORDER BY id ASC LIMIT 1")
-        row = cur.fetchone()
-
-    if not row:
-        return None
-    cmd_row = dict(row)
-
-    if "status" in cols:
-        updates: list[str] = ["status = %s"]
-        vals: list[Any] = ["CLAIMED"]
-
-        if "claimed_by" in cols:
-            updates.append("claimed_by = %s")
-            vals.append(worker_id)
-        if "claimed_at" in cols:
-            updates.append("claimed_at = %s")
-            vals.append(now_iso())
-        if "claimed_at_ms" in cols:
-            updates.append("claimed_at_ms = %s")
-            vals.append(now_ms())
-
-        vals.extend([int(cmd_row.get("id")), "PENDING"])
-        with conn.cursor() as cur:
-            cur.execute(
-                f"UPDATE {schema}.commands SET {', '.join(updates)} WHERE id = %s AND UPPER(COALESCE(status,'')) = %s",
-                tuple(vals),
-            )
-            if cur.rowcount <= 0:
-                return None
-            cur.execute(f"SELECT * FROM {schema}.commands WHERE id = %s", (int(cmd_row.get("id")),))
-            updated = cur.fetchone() or {}
-        return dict(updated)
-
-    return cmd_row
+            UPDATE {schema}.commands AS c
+            SET {', '.join(set_parts)}
+            FROM picked
+            WHERE c.id = picked.id
+              AND UPPER(COALESCE(c.status,'')) = 'PENDING'
+            RETURNING c.*
+            """,
+            tuple(vals),
+        )
+        row = cur.fetchone() or {}
+    return dict(row) if row else None
 
 
 def mark_command(
@@ -406,19 +473,24 @@ def mark_command(
 
     updates: list[str] = []
     vals: list[Any] = []
+    status_upper = str(status or "").strip().upper() or "DONE"
 
     if "status" in cols:
         updates.append("status = %s")
-        vals.append(str(status))
-    if "done_at" in cols:
-        updates.append("done_at = %s")
-        vals.append(now_iso())
-    if "done_at_ms" in cols:
-        updates.append("done_at_ms = %s")
-        vals.append(now_ms())
+        vals.append(status_upper)
+
+    if status_upper in {"DONE", "REJECTED", "FAILED"}:
+        if "done_at" in cols:
+            updates.append("done_at = %s")
+            vals.append(now_iso())
+        if "done_at_ms" in cols:
+            updates.append("done_at_ms = %s")
+            vals.append(now_ms())
+
     if "ack_meta" in cols and ack_meta is not None:
         updates.append("ack_meta = %s")
         vals.append(json.dumps(dict(ack_meta), ensure_ascii=True, default=str))
+
     if "last_error" in cols and last_error is not None:
         updates.append("last_error = %s")
         vals.append(str(last_error))
@@ -580,7 +652,84 @@ def normalize_side(raw: Any) -> str:
     return side or "LONG"
 
 
-def process_command(conn: psycopg.Connection, role: str, schema: str, cmd_row: Mapping[str, Any]) -> None:
+def _live_open_allowed(conn: psycopg.Connection, schema: str) -> tuple[bool, str, Dict[str, Any]]:
+    execution_enabled = (
+        truthy(fetch_setting(conn, schema, "execution_enabled", "0"))
+        or truthy(fetch_setting(conn, schema, "live_execution_enabled", "0"))
+        or truthy(fetch_setting(conn, schema, "ENABLE_LIVE_TRADING", "0"))
+    )
+
+    mode = str(fetch_setting(conn, schema, "mode", fetch_setting(conn, schema, "RUN_MODE", "")) or "").upper()
+    testnet_flag = (
+        truthy(fetch_setting(conn, schema, "USE_TESTNET", "0"))
+        or truthy(fetch_setting(conn, schema, "use_testnet", "0"))
+        or truthy(fetch_setting(conn, schema, "TESTNET", "0"))
+        or truthy(fetch_setting(conn, schema, "sandbox", "0"))
+        or mode in SAFE_LIVE_MODES
+    )
+
+    override = truthy(_env("LIVE_EXECUTION_ALLOWED", "0"))
+    allowed = bool(execution_enabled and (testnet_flag or override))
+
+    details = {
+        "execution_enabled": bool(execution_enabled),
+        "safe_testnet_or_sandbox": bool(testnet_flag),
+        "live_execution_allowed_override": bool(override),
+        "mode": mode,
+    }
+
+    if not execution_enabled:
+        return False, "live_execution_disabled", details
+    if not (testnet_flag or override):
+        return False, "live_execution_not_safe", details
+    return allowed, "ok", details
+
+
+def _emit_health_heartbeat(
+    conn: psycopg.Connection,
+    *,
+    role: str,
+    schema: str,
+    engine_id: str,
+    execution_mode: str,
+    schema_version: str,
+) -> None:
+    ts_iso = now_iso()
+    set_setting(conn, schema, "last_heartbeat", ts_iso)
+    set_setting(conn, schema, "bot_heartbeat", ts_iso)
+    set_setting(conn, schema, "execution_monitor_heartbeat", ts_iso)
+
+    trace_id = uuid.uuid4().hex
+    decision_id = uuid.uuid4().hex
+    payload = {
+        "component": "nautilus_engine",
+        "engine_id": engine_id,
+        "role": role,
+        "schema": schema,
+        "execution_mode": execution_mode,
+        "created_at": ts_iso,
+        "created_at_ms": now_ms(),
+    }
+    append_event(
+        conn,
+        schema,
+        role=role,
+        event_type="HealthEvent",
+        payload=payload,
+        trace_id=trace_id,
+        decision_id=decision_id,
+        schema_version=schema_version,
+    )
+
+
+def process_command(
+    conn: psycopg.Connection,
+    role: str,
+    schema: str,
+    cmd_row: Mapping[str, Any],
+    *,
+    execution_mode: str,
+) -> None:
     command_id = safe_int(cmd_row.get("id"), 0)
     cmd = str(cmd_row.get("cmd") or "").strip().upper()
     params = safe_json_loads(cmd_row.get("params"), {})
@@ -591,6 +740,9 @@ def process_command(conn: psycopg.Connection, role: str, schema: str, cmd_row: M
     decision_id = str(params.get("decision_id") or uuid.uuid4().hex)
     schema_version = str(params.get("schema_version") or _env("SIGNAL_SCHEMA_VERSION", "v1"))
 
+    if command_id <= 0:
+        return
+
     kill_switch_on = truthy(fetch_setting(conn, schema, "kill_switch", "0"))
     if kill_switch_on and is_opening_command(cmd):
         msg = f"kill_switch=1 blocked opening command {cmd}"
@@ -599,8 +751,8 @@ def process_command(conn: psycopg.Connection, role: str, schema: str, cmd_row: M
             conn,
             schema,
             role=role,
-            action="BLOCK",
-            payload={"cmd": cmd, "reason": "kill_switch", "command_id": command_id},
+            event_type="TradeEvent",
+            payload={"action": "BLOCK", "cmd": cmd, "reason": "kill_switch", "command_id": command_id},
             trace_id=trace_id,
             decision_id=decision_id,
             schema_version=schema_version,
@@ -615,10 +767,38 @@ def process_command(conn: psycopg.Connection, role: str, schema: str, cmd_row: M
         )
         return
 
+    if role == "live" and is_opening_command(cmd):
+        allowed, reason, details = _live_open_allowed(conn, schema)
+        if not allowed:
+            insert_log(conn, schema, "WARN", f"live safety gate blocked opening command {cmd}: {reason}")
+            append_event(
+                conn,
+                schema,
+                role=role,
+                event_type="TradeEvent",
+                payload={
+                    "action": "BLOCK",
+                    "cmd": cmd,
+                    "reason": reason,
+                    "details": details,
+                    "command_id": command_id,
+                },
+                trace_id=trace_id,
+                decision_id=decision_id,
+                schema_version=schema_version,
+            )
+            mark_command(
+                conn,
+                schema,
+                command_id,
+                status="REJECTED",
+                ack_meta={"ok": False, "blocked": reason, "cmd": cmd, "details": details},
+                last_error=reason,
+            )
+            return
+
     if cmd == "EXECUTE_SIGNAL":
-        symbol = str(params.get("symbol") or params.get("pair") or "").strip().upper()
-        if not symbol:
-            symbol = "UNKNOWN"
+        symbol = str(params.get("symbol") or params.get("pair") or "").strip().upper() or "UNKNOWN"
         side = normalize_side(params.get("side") or params.get("signal") or params.get("direction"))
         trade_id = insert_open_trade(
             conn,
@@ -630,19 +810,22 @@ def process_command(conn: psycopg.Connection, role: str, schema: str, cmd_row: M
             decision_id=decision_id,
             schema_version=schema_version,
         )
+
         insert_log(conn, schema, "INFO", f"simulated EXECUTE_SIGNAL -> trade_id={trade_id} {symbol} {side}")
         evt_payload = {
+            "action": "OPEN",
             "command": cmd,
             "command_id": command_id,
             "trade_id": trade_id,
             "symbol": symbol,
             "side": side,
-            "execution_mode": "PAPER",
+            "execution_mode": execution_mode,
         }
         append_trade_event(
             conn,
             schema,
-            action="OPEN",
+            role=role,
+            event_type="TradeEvent",
             payload=evt_payload,
             trace_id=trace_id,
             decision_id=decision_id,
@@ -652,7 +835,7 @@ def process_command(conn: psycopg.Connection, role: str, schema: str, cmd_row: M
             conn,
             schema,
             role=role,
-            action="OPEN",
+            event_type="TradeEvent",
             payload=evt_payload,
             trace_id=trace_id,
             decision_id=decision_id,
@@ -672,16 +855,18 @@ def process_command(conn: psycopg.Connection, role: str, schema: str, cmd_row: M
         closed = close_all_positions(conn, schema, reason)
         insert_log(conn, schema, "INFO", f"simulated CLOSE_ALL_POSITIONS -> closed={closed}")
         evt_payload = {
+            "action": "CLOSE_ALL",
             "command": cmd,
             "command_id": command_id,
             "closed": closed,
             "reason": reason,
-            "execution_mode": "PAPER",
+            "execution_mode": execution_mode,
         }
         append_trade_event(
             conn,
             schema,
-            action="CLOSE_ALL",
+            role=role,
+            event_type="TradeEvent",
             payload=evt_payload,
             trace_id=trace_id,
             decision_id=decision_id,
@@ -691,7 +876,7 @@ def process_command(conn: psycopg.Connection, role: str, schema: str, cmd_row: M
             conn,
             schema,
             role=role,
-            action="CLOSE_ALL",
+            event_type="TradeEvent",
             payload=evt_payload,
             trace_id=trace_id,
             decision_id=decision_id,
@@ -712,17 +897,19 @@ def process_command(conn: psycopg.Connection, role: str, schema: str, cmd_row: M
         closed = close_trade_by_id(conn, schema, trade_id, reason) if trade_id > 0 else False
         insert_log(conn, schema, "INFO", f"simulated CLOSE_TRADE trade_id={trade_id} closed={closed}")
         evt_payload = {
+            "action": "CLOSE",
             "command": cmd,
             "command_id": command_id,
             "trade_id": trade_id,
             "closed": bool(closed),
             "reason": reason,
-            "execution_mode": "PAPER",
+            "execution_mode": execution_mode,
         }
         append_trade_event(
             conn,
             schema,
-            action="CLOSE",
+            role=role,
+            event_type="TradeEvent",
             payload=evt_payload,
             trace_id=trace_id,
             decision_id=decision_id,
@@ -732,7 +919,7 @@ def process_command(conn: psycopg.Connection, role: str, schema: str, cmd_row: M
             conn,
             schema,
             role=role,
-            action="CLOSE",
+            event_type="TradeEvent",
             payload=evt_payload,
             trace_id=trace_id,
             decision_id=decision_id,
@@ -747,24 +934,18 @@ def process_command(conn: psycopg.Connection, role: str, schema: str, cmd_row: M
         )
         return
 
-    # Unknown command: acknowledge to keep queue moving.
     insert_log(conn, schema, "INFO", f"ignored command {cmd}")
     mark_command(conn, schema, command_id, status="DONE", ack_meta={"ok": True, "ignored": True, "cmd": cmd})
 
 
 def run_loop() -> None:
-    raw_roles = [x.strip().lower() for x in _env("NAUTILUS_ROLES", "paper").split(",") if x.strip()]
-    roles = [r for r in raw_roles if r in ROLE_TO_SCHEMA]
-    if not roles:
-        roles = ["paper"]
+    role_targets = resolve_role_schemas()
 
-    mode = _env("NAUTILUS_MODE", "PAPER").strip().upper()
-    if mode not in {"PAPER", "SIM"}:
-        print(f"[nautilus_engine] unsupported mode={mode}, forcing PAPER")
-        mode = "PAPER"
-
-    engine_id = _env("ENGINE_ID", "nautilus_engine").strip() or "nautilus_engine"
+    execution_mode = _env("EXECUTION_MODE", _env("NAUTILUS_MODE", "SIM")).strip().upper() or "SIM"
+    engine_id = _env("ENGINE_ID", _env("HOSTNAME", "nautilus_engine")).strip() or "nautilus_engine"
     poll_sec = max(1, safe_int(_env("NAUTILUS_POLL_SEC", "2"), 2))
+    hb_sec = max(5, safe_int(_env("HEALTH_HEARTBEAT_SEC", "15"), 15))
+    default_schema_version = _env("SIGNAL_SCHEMA_VERSION", "v1")
 
     try:
         import nautilus_trader  # type: ignore  # noqa: F401
@@ -773,15 +954,31 @@ def run_loop() -> None:
     except Exception:
         print("[nautilus_engine] nautilus_trader import: unavailable (running skeleton mode)")
 
-    print(f"[nautilus_engine] start mode={mode} roles={roles} poll={poll_sec}s")
+    print(
+        f"[nautilus_engine] start execution_mode={execution_mode} targets={role_targets} poll={poll_sec}s heartbeat={hb_sec}s"
+    )
+
+    last_hb_ms: Dict[str, int] = {}
 
     while True:
         did_work = False
         try:
             with connect() as conn:
-                for role in roles:
-                    schema = role_to_schema(role)
+                loop_now_ms = now_ms()
+                for role, schema in role_targets:
                     ensure_schema_tables(conn, schema)
+
+                    hb_key = f"{role}:{schema}"
+                    if loop_now_ms - safe_int(last_hb_ms.get(hb_key), 0) >= hb_sec * 1000:
+                        _emit_health_heartbeat(
+                            conn,
+                            role=role,
+                            schema=schema,
+                            engine_id=engine_id,
+                            execution_mode=execution_mode,
+                            schema_version=default_schema_version,
+                        )
+                        last_hb_ms[hb_key] = loop_now_ms
 
                     while True:
                         cmd_row = claim_next_pending_command(conn, schema, engine_id)
@@ -789,7 +986,7 @@ def run_loop() -> None:
                             break
                         did_work = True
                         try:
-                            process_command(conn, role, schema, cmd_row)
+                            process_command(conn, role, schema, cmd_row, execution_mode=execution_mode)
                         except Exception as exc:
                             cid = safe_int((cmd_row or {}).get("id"), 0)
                             insert_log(conn, schema, "ERROR", f"command failed id={cid}: {type(exc).__name__}: {exc}")
@@ -798,7 +995,7 @@ def run_loop() -> None:
                                     conn,
                                     schema,
                                     cid,
-                                    status="ERROR",
+                                    status="FAILED",
                                     ack_meta={"ok": False, "error": str(exc)},
                                     last_error=str(exc),
                                 )
