@@ -125,6 +125,29 @@ STRATEGY_BODY='{"strategy_id":"BASELINE_SCALP","role":"live","enabled":true,"min
 STRATEGY_RESP="$(curl_capture "${BASE}/api/strategies" -X POST "${HDR[@]}" "${LIVE_HDR[@]}" -H "Content-Type: application/json" -d "${STRATEGY_BODY}" || true)"
 expect_2xx "${CURL_LAST_CODE}" "live strategy update"
 
+echo "== Arm/confirm live safety gate + permissive smoke allowlist/limits =="
+DISARM_RESP="$(curl_capture "${BASE}/api/control/live/disarm" -X POST "${HDR[@]}" -H "Content-Type: application/json" -d '{}' || true)"
+expect_2xx "${CURL_LAST_CODE}" "live gate disarm"
+
+ARM_RESP="$(curl_capture "${BASE}/api/control/live/arm" -X POST "${HDR[@]}" -H "Content-Type: application/json" -d '{}' || true)"
+expect_2xx "${CURL_LAST_CODE}" "live gate arm"
+GATE_TOKEN="$(json_get "${ARM_RESP}" "token")"
+[[ -n "${GATE_TOKEN}" ]] || fail "live gate arm did not return token"
+
+CONFIRM_BODY='{"token":"'"${GATE_TOKEN}"'"}'
+CONFIRM_RESP="$(curl_capture "${BASE}/api/control/live/confirm" -X POST "${HDR[@]}" -H "Content-Type: application/json" -d "${CONFIRM_BODY}" || true)"
+expect_2xx "${CURL_LAST_CODE}" "live gate confirm"
+GATE_STATE="$(json_get "${CONFIRM_RESP}" "gate.state")"
+[[ "${GATE_STATE}" == "CONFIRMED" ]] || fail "live gate did not reach CONFIRMED"
+
+ALLOWLIST_BODY='{"symbols":["SOLUSDT","ADAUSDT","BTCUSDT"]}'
+ALLOWLIST_RESP="$(curl_capture "${BASE}/api/control/live/allowlist" -X POST "${HDR[@]}" -H "Content-Type: application/json" -d "${ALLOWLIST_BODY}" || true)"
+expect_2xx "${CURL_LAST_CODE}" "live allowlist update"
+
+LIMITS_BODY='{"max_open_positions":100,"max_notional":1000000,"max_daily_loss":100000}'
+LIMITS_RESP="$(curl_capture "${BASE}/api/control/live/limits" -X POST "${HDR[@]}" -H "Content-Type: application/json" -d "${LIMITS_BODY}" || true)"
+expect_2xx "${CURL_LAST_CODE}" "live limits update"
+
 echo "== Step A/B/C: publish -> approve -> DONE + OPEN trade =="
 P1_BODY='{"symbol":"SOLUSDT","side":"BUY","price":150,"confidence":0.99,"score":0.99,"execution_allowed":false,"strategy":"BASELINE_SCALP","source":"smoke_live_cutover"}'
 P1_RESP="$(curl_capture "${BASE}/api/unified/live/publish" -X POST "${HDR[@]}" -H "Content-Type: application/json" -d "${P1_BODY}" || true)"
