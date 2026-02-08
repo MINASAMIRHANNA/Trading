@@ -1,0 +1,136 @@
+{% extends "ui/base.html" %}
+{% block content %}
+  <div class="panel" style="margin-bottom: 16px;">
+    <div class="panel-head"><i class="fa-solid fa-wave-square"></i> Unified Observability</div>
+    <div class="form-row">
+      <div class="input-wrap">
+        <label>Roles</label>
+        <div class="inline-actions" id="obs-role-picks">
+          <label><input type="checkbox" class="obs-role" value="paper" checked /> paper</label>
+          <label><input type="checkbox" class="obs-role" value="live" checked /> live</label>
+          <label><input type="checkbox" class="obs-role" value="pump" checked /> pump</label>
+        </div>
+      </div>
+      <div class="input-wrap">
+        <label>Auto Refresh</label>
+        <div class="inline-actions">
+          <button class="btn btn-secondary small-btn" onclick="refreshObservability()"><i class="fa-solid fa-rotate-right"></i> Refresh</button>
+          <span class="note">Every 10s</span>
+        </div>
+      </div>
+    </div>
+    <div class="note" id="obs-last-updated">Last updated: —</div>
+  </div>
+
+  <div class="panel" style="margin-bottom: 16px;">
+    <div class="panel-head"><i class="fa-solid fa-server"></i> Roles Snapshot</div>
+    <div class="table-wrap">
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th>Role</th>
+            <th>Online</th>
+            <th>Last Seen (s)</th>
+            <th>Kill Switch</th>
+            <th>Live Gate</th>
+            <th>Last Claim</th>
+            <th>Last Trade</th>
+            <th>Errors</th>
+          </tr>
+        </thead>
+        <tbody id="obs-body"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-head"><i class="fa-solid fa-triangle-exclamation"></i> Non-Fatal Errors</div>
+    <pre id="obs-errors" class="terminal-box">[]</pre>
+  </div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function selectedRoles() {
+  return Array.from(document.querySelectorAll('.obs-role:checked')).map((el) => el.value);
+}
+
+function fmtMs(ms) {
+  const n = Number(ms || 0);
+  if (!Number.isFinite(n) || n <= 0) return '-';
+  return new Date(n).toISOString();
+}
+
+function roleErrorCount(errors, role) {
+  if (!Array.isArray(errors)) return 0;
+  return errors.filter((e) => String((e || {}).role || '') === role).length;
+}
+
+function claimSummary(item) {
+  const c = item && item.last_claim;
+  if (!c || typeof c !== 'object') return '-';
+  const id = c.command_id != null ? c.command_id : '-';
+  const cmd = c.cmd || '-';
+  const st = c.status || '-';
+  return `${id}/${cmd}/${st}`;
+}
+
+function tradeSummary(item) {
+  const t = item && item.last_trade;
+  if (!t || typeof t !== 'object') return '-';
+  const id = t.trade_id != null ? t.trade_id : '-';
+  const sym = t.symbol || '-';
+  const st = t.status || '-';
+  return `${id}/${sym}/${st}`;
+}
+
+async function refreshObservability() {
+  try {
+    const roles = selectedRoles();
+    if (!roles.length) {
+      showToast('Select at least one role', false);
+      return;
+    }
+
+    const qs = roles.length === 3 ? '' : `?roles=${encodeURIComponent(roles.join(','))}`;
+    const data = await fetchJson(`/api/unified/observability${qs}`);
+    const items = Array.isArray(data.items) ? data.items : [];
+    const errs = Array.isArray(data.errors) ? data.errors : [];
+
+    const body = document.getElementById('obs-body');
+    body.innerHTML = '';
+
+    if (!items.length) {
+      body.innerHTML = '<tr><td colspan="8">No rows</td></tr>';
+    }
+
+    items.forEach((item) => {
+      const role = item.role || '-';
+      const engine = item.engine || {};
+      const ks = item.kill_switch || {};
+      const liveGate = item.live_gate || null;
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td>${role}</td>
+        <td>${Boolean(engine.online) ? '<span class="badge-soft badge-ok">online</span>' : '<span class="badge-soft badge-crit">offline</span>'}</td>
+        <td>${engine.last_seen_seconds == null ? '-' : engine.last_seen_seconds}</td>
+        <td>${Boolean(ks.on) ? 'ON' : 'OFF'}${ks.reason ? ` (${ks.reason})` : ''}</td>
+        <td>${liveGate && liveGate.state ? liveGate.state : '-'}</td>
+        <td>${claimSummary(item)}</td>
+        <td>${tradeSummary(item)}</td>
+        <td>${roleErrorCount(errs, role)}</td>
+      `;
+      body.appendChild(tr);
+    });
+
+    document.getElementById('obs-errors').textContent = JSON.stringify(errs, null, 2);
+    document.getElementById('obs-last-updated').textContent = `Last updated: ${new Date().toISOString()}`;
+  } catch (e) {
+    showToast(e.message || 'Observability load failed', false);
+  }
+}
+
+setInterval(refreshObservability, 10000);
+refreshObservability();
+</script>
+{% endblock %}

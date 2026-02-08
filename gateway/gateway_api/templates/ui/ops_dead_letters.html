@@ -1,0 +1,97 @@
+{% extends "ui/base.html" %}
+{% block content %}
+  <div class="panel" style="margin-bottom: 16px;">
+    <div class="panel-head"><i class="fa-solid fa-envelope-open-text"></i> Dead Letters (All Roles)</div>
+    <div class="form-row">
+      <div class="input-wrap">
+        <label>Limit per role</label>
+        <input id="dl-limit" type="number" min="1" max="200" value="50" />
+      </div>
+      <div class="input-wrap">
+        <label>Actions</label>
+        <div class="inline-actions">
+          <button class="btn btn-secondary small-btn" onclick="refreshDeadLetters()"><i class="fa-solid fa-rotate-right"></i> Refresh</button>
+        </div>
+      </div>
+    </div>
+    <div class="note" id="dl-updated">Last updated: —</div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-head"><i class="fa-solid fa-list"></i> Latest Dead Letters</div>
+    <div class="table-wrap">
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th>Role</th>
+            <th>Dead Letter ID</th>
+            <th>Command ID</th>
+            <th>Cmd</th>
+            <th>Attempts</th>
+            <th>Last Error</th>
+            <th>Inserted At (ms)</th>
+          </tr>
+        </thead>
+        <tbody id="dl-body"></tbody>
+      </table>
+    </div>
+  </div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const DL_ROLES = ['paper', 'live', 'pump'];
+
+function escHtml(s) {
+  return String(s == null ? '' : s)
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#39;');
+}
+
+async function refreshDeadLetters() {
+  const limit = Math.max(1, Math.min(200, Number(document.getElementById('dl-limit').value || 50)));
+  const body = document.getElementById('dl-body');
+  body.innerHTML = '';
+
+  try {
+    const responses = await Promise.all(
+      DL_ROLES.map((role) => fetchJson(`/api/unified/dead_letters?role=${encodeURIComponent(role)}&limit=${limit}`))
+    );
+
+    let rows = 0;
+    responses.forEach((res, idx) => {
+      const role = DL_ROLES[idx];
+      const items = Array.isArray(res.items) ? res.items : [];
+      items.forEach((it) => {
+        rows += 1;
+        const tr = document.createElement('tr');
+        const attempts = `${it.attempt_count ?? '-'} / ${it.max_attempts ?? '-'}`;
+        tr.innerHTML = `
+          <td>${role}</td>
+          <td>${it.id ?? '-'}</td>
+          <td>${it.command_id ?? '-'}</td>
+          <td>${escHtml(it.cmd || '-')}</td>
+          <td>${attempts}</td>
+          <td title="${escHtml(it.last_error || '')}">${escHtml((it.last_error || '').slice(0, 140)) || '-'}</td>
+          <td>${it.inserted_at_ms ?? '-'}</td>
+        `;
+        body.appendChild(tr);
+      });
+    });
+
+    if (!rows) {
+      body.innerHTML = '<tr><td colspan="7">No dead letters found</td></tr>';
+    }
+
+    document.getElementById('dl-updated').textContent = `Last updated: ${new Date().toISOString()}`;
+  } catch (e) {
+    showToast(e.message || 'Dead letters load failed', false);
+  }
+}
+
+refreshDeadLetters();
+</script>
+{% endblock %}

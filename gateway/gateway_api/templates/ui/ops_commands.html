@@ -1,0 +1,126 @@
+{% extends "ui/base.html" %}
+{% block content %}
+  <div class="panel" style="margin-bottom: 16px;">
+    <div class="panel-head"><i class="fa-solid fa-terminal"></i> Commands Viewer</div>
+    <div class="form-row">
+      <div class="input-wrap">
+        <label>Role</label>
+        <select id="cmd-role" class="dark-input">
+          <option value="paper">paper</option>
+          <option value="live">live</option>
+          <option value="pump">pump</option>
+        </select>
+      </div>
+      <div class="input-wrap">
+        <label>Status Filter</label>
+        <select id="cmd-status" class="dark-input">
+          <option value="">ALL</option>
+          <option value="PENDING">PENDING</option>
+          <option value="CLAIMED">CLAIMED</option>
+          <option value="DONE">DONE</option>
+          <option value="FAILED">FAILED</option>
+          <option value="REJECTED">REJECTED</option>
+          <option value="DEAD">DEAD</option>
+        </select>
+      </div>
+      <div class="input-wrap">
+        <label>Limit</label>
+        <input id="cmd-limit" type="number" min="1" max="200" value="50" />
+      </div>
+    </div>
+    <div class="inline-actions" style="margin-top: 10px;">
+      <button class="btn btn-secondary small-btn" onclick="refreshCommands()"><i class="fa-solid fa-rotate-right"></i> Refresh</button>
+    </div>
+    <div class="note" id="cmd-updated">Last updated: —</div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-head"><i class="fa-solid fa-list"></i> Command Rows</div>
+    <div class="table-wrap">
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th>ID</th>
+            <th>Cmd</th>
+            <th>Status</th>
+            <th>Claimed By</th>
+            <th>Attempt</th>
+            <th>Dead Lettered</th>
+            <th>Ack Meta</th>
+          </tr>
+        </thead>
+        <tbody id="cmd-body"></tbody>
+      </table>
+    </div>
+  </div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function escHtml(s) {
+  return String(s == null ? '' : s)
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#39;');
+}
+
+function ackMetaString(v) {
+  if (v == null) return '';
+  if (typeof v === 'object') {
+    try { return JSON.stringify(v, null, 2); } catch (e) { return String(v); }
+  }
+  const txt = String(v);
+  try {
+    const parsed = JSON.parse(txt);
+    return JSON.stringify(parsed, null, 2);
+  } catch (e) {
+    return txt;
+  }
+}
+
+async function refreshCommands() {
+  const role = document.getElementById('cmd-role').value || 'paper';
+  const status = document.getElementById('cmd-status').value || '';
+  const limit = Math.max(1, Math.min(200, Number(document.getElementById('cmd-limit').value || 50)));
+
+  const qs = new URLSearchParams();
+  qs.set('limit', String(limit));
+  if (status) qs.set('status', status);
+
+  try {
+    const data = await fetchJson(`/api/unified/${encodeURIComponent(role)}/commands?${qs.toString()}`);
+    const items = Array.isArray(data.items) ? data.items : [];
+    const body = document.getElementById('cmd-body');
+    body.innerHTML = '';
+
+    if (!items.length) {
+      body.innerHTML = '<tr><td colspan="7">No command rows</td></tr>';
+    }
+
+    items.forEach((c) => {
+      const attempt = `${c.attempt_count ?? '-'} / ${c.max_attempts ?? '-'}`;
+      const ack = escHtml(ackMetaString(c.ack_meta));
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td>${c.id ?? '-'}</td>
+        <td>${escHtml(c.cmd || '-')}</td>
+        <td>${escHtml(c.status || '-')}</td>
+        <td>${escHtml(c.claimed_by || '-')}</td>
+        <td>${attempt}</td>
+        <td>${Boolean(c.dead_lettered)}</td>
+        <td><details><summary>view</summary><pre style="white-space:pre-wrap; margin:0;">${ack || '-'}</pre></details></td>
+      `;
+      body.appendChild(tr);
+    });
+
+    document.getElementById('cmd-updated').textContent = `Last updated: ${new Date().toISOString()}`;
+  } catch (e) {
+    showToast(e.message || 'Commands load failed', false);
+  }
+}
+
+refreshCommands();
+</script>
+{% endblock %}

@@ -1,0 +1,202 @@
+{% extends "ui/base.html" %}
+{% block content %}
+  <div class="panel" style="margin-bottom: 16px;">
+    <div class="panel-head"><i class="fa-solid fa-shield-halved"></i> Live Safety Control</div>
+    <div class="inline-actions" style="margin-bottom: 10px;">
+      <button class="btn btn-warning small-btn" onclick="armGate()">ARM</button>
+      <button class="btn btn-blue small-btn" onclick="confirmGate()">CONFIRM</button>
+      <button class="btn btn-danger small-btn" onclick="disarmGate()">DISARM</button>
+      <button class="btn btn-secondary small-btn" onclick="loadStatus()"><i class="fa-solid fa-rotate-right"></i> Refresh</button>
+    </div>
+    <div class="form-row">
+      <div class="input-wrap">
+        <label>Confirm Token</label>
+        <input id="live-token" placeholder="paste token from ARM" />
+      </div>
+      <div class="input-wrap">
+        <label>Last ARM Token (from response)</label>
+        <input id="live-last-token" readonly />
+      </div>
+    </div>
+    <div class="note" id="live-updated">Last updated: —</div>
+  </div>
+
+  <div class="panel" style="margin-bottom: 16px;">
+    <div class="panel-head"><i class="fa-solid fa-circle-info"></i> Current Live Status</div>
+    <div class="kv-grid" id="live-status-grid"></div>
+  </div>
+
+  <div class="panel" style="margin-bottom: 16px;">
+    <div class="panel-head"><i class="fa-solid fa-list-check"></i> Symbol Allowlist</div>
+    <div class="input-wrap">
+      <label>Symbols (comma/newline separated)</label>
+      <textarea id="live-allowlist" rows="5" style="width:100%; background:#0b0e14; color:#fff; border:1px solid var(--border); border-radius:6px; padding:10px; font-family:'JetBrains Mono', monospace;"></textarea>
+    </div>
+    <div class="inline-actions" style="margin-top: 10px;">
+      <button class="btn btn-secondary small-btn" onclick="saveAllowlist()">Save Allowlist</button>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-head"><i class="fa-solid fa-sliders"></i> Live Limits</div>
+    <div class="form-row">
+      <div class="input-wrap">
+        <label>max_open_positions</label>
+        <input id="limit-open" type="number" min="0" step="1" />
+      </div>
+      <div class="input-wrap">
+        <label>max_notional</label>
+        <input id="limit-notional" type="number" min="0" step="0.01" />
+      </div>
+      <div class="input-wrap">
+        <label>max_daily_loss</label>
+        <input id="limit-loss" type="number" min="0" step="0.01" />
+      </div>
+    </div>
+    <div class="inline-actions" style="margin-top: 10px;">
+      <button class="btn btn-secondary small-btn" onclick="saveLimits()">Save Limits</button>
+    </div>
+  </div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function toIso(ms) {
+  const n = Number(ms || 0);
+  if (!Number.isFinite(n) || n <= 0) return '-';
+  return new Date(n).toISOString();
+}
+
+function normSymbols(text) {
+  const arr = String(text || '').split(/[\n,]/g).map((x) => x.trim().toUpperCase()).filter(Boolean);
+  return [...new Set(arr)];
+}
+
+function renderStatus(data) {
+  const gate = (data && data.gate) || {};
+  const flags = (data && data.flags) || {};
+  const limits = (data && data.limits) || {};
+  const ks = (data && data.kill_switch) || {};
+  const allowlist = Array.isArray(data && data.allowlist) ? data.allowlist : [];
+
+  const grid = document.getElementById('live-status-grid');
+  grid.innerHTML = `
+    <div class="kv-item"><div class="kv-label">Gate State</div><div class="kv-value">${gate.state || 'DISARMED'}</div></div>
+    <div class="kv-item"><div class="kv-label">Gate Armed At (UTC)</div><div class="kv-value">${toIso(gate.armed_at_ms)}</div></div>
+    <div class="kv-item"><div class="kv-label">Gate Confirmed At (UTC)</div><div class="kv-value">${toIso(gate.confirmed_at_ms)}</div></div>
+    <div class="kv-item"><div class="kv-label">Token Present</div><div class="kv-value">${Boolean(gate.token_present)}</div></div>
+    <div class="kv-item"><div class="kv-label">Testnet Only</div><div class="kv-value">${Boolean(flags.testnet_only)}</div></div>
+    <div class="kv-item"><div class="kv-label">Allow Real Execution</div><div class="kv-value">${Boolean(flags.allow_real_execution)}</div></div>
+    <div class="kv-item"><div class="kv-label">Execution Enabled</div><div class="kv-value">${Boolean(flags.execution_enabled)}</div></div>
+    <div class="kv-item"><div class="kv-label">Mode / Testnet</div><div class="kv-value">${flags.mode || '-'} / ${Boolean(flags.use_testnet)}</div></div>
+    <div class="kv-item"><div class="kv-label">Kill Switch</div><div class="kv-value">${Boolean(ks.enabled)} ${ks.reason ? `(${ks.reason})` : ''}</div></div>
+    <div class="kv-item"><div class="kv-label">Allowlist Count</div><div class="kv-value">${allowlist.length}</div></div>
+    <div class="kv-item"><div class="kv-label">max_open_positions</div><div class="kv-value">${limits.max_open_positions ?? '-'}</div></div>
+    <div class="kv-item"><div class="kv-label">max_notional / max_daily_loss</div><div class="kv-value">${limits.max_notional ?? '-'} / ${limits.max_daily_loss ?? '-'}</div></div>
+  `;
+
+  document.getElementById('live-allowlist').value = allowlist.join('\n');
+  document.getElementById('limit-open').value = limits.max_open_positions ?? 1;
+  document.getElementById('limit-notional').value = limits.max_notional ?? 50;
+  document.getElementById('limit-loss').value = limits.max_daily_loss ?? 10;
+}
+
+async function loadStatus() {
+  try {
+    const data = await fetchJson('/api/control/live/status');
+    renderStatus(data);
+    document.getElementById('live-updated').textContent = `Last updated: ${new Date().toISOString()}`;
+  } catch (e) {
+    showToast(e.message || 'Failed to load live status', false);
+  }
+}
+
+async function armGate() {
+  try {
+    const data = await fetchJson('/api/control/live/arm', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    });
+    const token = data.token || '';
+    if (token) {
+      document.getElementById('live-last-token').value = token;
+      document.getElementById('live-token').value = token;
+    }
+    showToast('Live gate armed');
+    await loadStatus();
+  } catch (e) {
+    showToast(e.message || 'ARM failed', false);
+  }
+}
+
+async function confirmGate() {
+  const token = (document.getElementById('live-token').value || '').trim();
+  if (!token) {
+    showToast('Token is required', false);
+    return;
+  }
+  try {
+    await fetchJson('/api/control/live/confirm', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token }),
+    });
+    showToast('Live gate confirmed');
+    await loadStatus();
+  } catch (e) {
+    showToast(e.message || 'CONFIRM failed', false);
+  }
+}
+
+async function disarmGate() {
+  try {
+    await fetchJson('/api/control/live/disarm', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    });
+    showToast('Live gate disarmed');
+    await loadStatus();
+  } catch (e) {
+    showToast(e.message || 'DISARM failed', false);
+  }
+}
+
+async function saveAllowlist() {
+  const symbols = normSymbols(document.getElementById('live-allowlist').value);
+  try {
+    await fetchJson('/api/control/live/allowlist', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ symbols }),
+    });
+    showToast(`Allowlist saved (${symbols.length})`);
+    await loadStatus();
+  } catch (e) {
+    showToast(e.message || 'Allowlist save failed', false);
+  }
+}
+
+async function saveLimits() {
+  const payload = {
+    max_open_positions: Number(document.getElementById('limit-open').value || 0),
+    max_notional: Number(document.getElementById('limit-notional').value || 0),
+    max_daily_loss: Number(document.getElementById('limit-loss').value || 0),
+  };
+  try {
+    await fetchJson('/api/control/live/limits', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    showToast('Limits saved');
+    await loadStatus();
+  } catch (e) {
+    showToast(e.message || 'Limits save failed', false);
+  }
+}
+
+loadStatus();
+</script>
+{% endblock %}
