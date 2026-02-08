@@ -12,6 +12,15 @@ BASE="${BASE_URL:-http://localhost:8200}"
 KEY="${X_API_KEY:-${API_KEY:-trading-dev}}"
 
 HDR=(-H "X-API-Key: ${KEY}")
+LIVE_HDR=()
+APPROVE_BODY='{"note":"smoke approve"}'
+QUEUE_BODY='{"cmd":"CLOSE_ALL_POSITIONS","params":{"reason":"smoke_all"}}'
+
+if [[ "${ROLE}" == "live" ]]; then
+  LIVE_HDR=(-H "X-Live-Confirm: true" -H "X-Live-Confirm-Ack: true")
+  APPROVE_BODY='{"note":"smoke approve","live_confirm":true,"live_confirm_ack":true}'
+  QUEUE_BODY='{"cmd":"CLOSE_ALL_POSITIONS","params":{"reason":"smoke_all"},"live_confirm":true,"live_confirm_ack":true}'
+fi
 
 echo "BASE_URL=${BASE}"
 echo
@@ -51,7 +60,11 @@ except Exception:
 fi
 
 if [[ -n "${FIRST_ID}" ]]; then
-  curl_capture "${BASE}/api/unified/${ROLE}/signals/${FIRST_ID}/approve" -X POST "${HDR[@]}" -H "Content-Type: application/json" -d '{"note":"smoke approve"}' | head -c 4000 || true
+  if [[ "${ROLE}" == "live" ]]; then
+    curl_capture "${BASE}/api/unified/${ROLE}/signals/${FIRST_ID}/approve" -X POST "${HDR[@]}" "${LIVE_HDR[@]}" -H "Content-Type: application/json" -d "${APPROVE_BODY}" | head -c 4000 || true
+  else
+    curl_capture "${BASE}/api/unified/${ROLE}/signals/${FIRST_ID}/approve" -X POST "${HDR[@]}" -H "Content-Type: application/json" -d "${APPROVE_BODY}" | head -c 4000 || true
+  fi
   echo
 else
   echo "No signals to approve."
@@ -59,7 +72,11 @@ fi
 echo
 
 echo "== Try queue CLOSE_ALL_POSITIONS (${ROLE}) =="
-curl_capture "${BASE}/api/unified/${ROLE}/commands" -X POST "${HDR[@]}" -H "Content-Type: application/json" -d '{"cmd":"CLOSE_ALL_POSITIONS","params":{"reason":"smoke_all"}}' | head -c 4000 || true
+if [[ "${ROLE}" == "live" ]]; then
+  curl_capture "${BASE}/api/unified/${ROLE}/commands" -X POST "${HDR[@]}" "${LIVE_HDR[@]}" -H "Content-Type: application/json" -d "${QUEUE_BODY}" | head -c 4000 || true
+else
+  curl_capture "${BASE}/api/unified/${ROLE}/commands" -X POST "${HDR[@]}" -H "Content-Type: application/json" -d "${QUEUE_BODY}" | head -c 4000 || true
+fi
 echo
 echo
 

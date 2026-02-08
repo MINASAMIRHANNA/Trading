@@ -4,14 +4,15 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-echo "== Phase 3: bring up Mina bots + monitors =="
+echo "== Phase 3: bring up engines + legacy pump role =="
 
 docker compose -f docker-compose.yml -f docker-compose.bots.yml up -d --build \
+  nautilus_paper_engine \
+  nautilus_live_engine \
   mina_pump_bot \
-  mina_live_bot mina_live_monitor \
-  mina_paper_bot mina_paper_monitor
+  mina_pump_monitor
 
-echo "== docker compose ps (bots + monitors) =="
+echo "== docker compose ps (engines + pump legacy) =="
 docker compose -f docker-compose.yml -f docker-compose.bots.yml ps
 
 echo "== Gateway unified system_health (sanity) =="
@@ -20,4 +21,4 @@ echo "== Gateway unified system_health (sanity) =="
 (curl -sS http://localhost:8200/api/unified/pump/system_health || true); echo
 
 echo "== tail logs (example) =="
-echo "  docker compose -f docker-compose.yml -f docker-compose.bots.yml logs -f --tail=120 mina_live_bot"
+echo "  docker compose -f docker-compose.yml -f docker-compose.bots.yml logs -f --tail=120 nautilus_live_engine"

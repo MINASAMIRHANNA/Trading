@@ -11,6 +11,13 @@ ROLE="${1:-paper}"
 BASE="${BASE_URL:-http://localhost:8200}"
 KEY="${X_API_KEY:-${API_KEY:-trading-dev}}"
 HDR=("-H" "X-API-Key: ${KEY}")
+LIVE_HDR=()
+BODY='{"cmd":"CLOSE_ALL_POSITIONS","params":{"reason":"smoke_test","ts_utc":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"}}'
+
+if [[ "${ROLE}" == "live" ]]; then
+  LIVE_HDR=(-H "X-Live-Confirm: true" -H "X-Live-Confirm-Ack: true")
+  BODY='{"cmd":"CLOSE_ALL_POSITIONS","params":{"reason":"smoke_test","ts_utc":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"},"live_confirm":true,"live_confirm_ack":true}'
+fi
 
 echo "== Health =="
 curl_json "${BASE}/health" || exit 1
@@ -23,8 +30,11 @@ fi
 printf '%s\n' "${OV}"
 
 echo "== Try queue CLOSE_ALL_POSITIONS (${ROLE}) =="
-BODY='{"cmd":"CLOSE_ALL_POSITIONS","params":{"reason":"smoke_test","ts_utc":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"}}'
-RESP="$(curl_capture "${BASE}/api/unified/${ROLE}/commands" -X POST "${HDR[@]}" -H "Content-Type: application/json" -d "${BODY}" || true)"
+if [[ "${ROLE}" == "live" ]]; then
+  RESP="$(curl_capture "${BASE}/api/unified/${ROLE}/commands" -X POST "${HDR[@]}" "${LIVE_HDR[@]}" -H "Content-Type: application/json" -d "${BODY}" || true)"
+else
+  RESP="$(curl_capture "${BASE}/api/unified/${ROLE}/commands" -X POST "${HDR[@]}" -H "Content-Type: application/json" -d "${BODY}" || true)"
+fi
 if [[ "${CURL_LAST_CODE}" == "404" ]]; then
   # Fallback: proxy to dashboard
   RESP="$(curl_capture "${BASE}/api/mina/${ROLE}/api/commands/queue" -X POST "${HDR[@]}" -H "Content-Type: application/json" -d "${BODY}" || true)"

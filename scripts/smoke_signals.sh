@@ -11,6 +11,13 @@ ROLE="${1:-paper}"
 BASE="${BASE_URL:-http://localhost:8200}"
 KEY="${X_API_KEY:-${API_KEY:-trading-dev}}"
 HDR=("-H" "X-API-Key: ${KEY}")
+LIVE_HDR=()
+APPROVE_BODY='{"note":"smoke approve"}'
+
+if [[ "${ROLE}" == "live" ]]; then
+  LIVE_HDR=(-H "X-Live-Confirm: true" -H "X-Live-Confirm-Ack: true")
+  APPROVE_BODY='{"note":"smoke approve","live_confirm":true,"live_confirm_ack":true}'
+fi
 
 echo "== Health =="
 curl_json "${BASE}/health" || exit 1
@@ -46,7 +53,11 @@ if [[ -z "${FIRST_ID}" ]]; then
 fi
 
 # Try unified approve
-APP="$(curl_capture -X POST "${BASE}/api/unified/${ROLE}/signals/${FIRST_ID}/approve" "${HDR[@]}" -H "Content-Type: application/json" -d '{"note":"smoke approve"}' || true)"
+if [[ "${ROLE}" == "live" ]]; then
+  APP="$(curl_capture -X POST "${BASE}/api/unified/${ROLE}/signals/${FIRST_ID}/approve" "${HDR[@]}" "${LIVE_HDR[@]}" -H "Content-Type: application/json" -d "${APPROVE_BODY}" || true)"
+else
+  APP="$(curl_capture -X POST "${BASE}/api/unified/${ROLE}/signals/${FIRST_ID}/approve" "${HDR[@]}" -H "Content-Type: application/json" -d "${APPROVE_BODY}" || true)"
+fi
 if [[ "${CURL_LAST_CODE}" == "404" ]]; then
   # Fallback: dashboard approve via proxy (expects {id, note})
   APP="$(curl_capture -X POST "${BASE}/api/mina/${ROLE}/api/signals/approve" "${HDR[@]}" -H "Content-Type: application/json" -d "{\"id\":${FIRST_ID},\"note\":\"smoke approve\"}" || true)"

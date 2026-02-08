@@ -4,17 +4,19 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-echo "== Phase 3: stop/remove Mina bots + monitors =="
+echo "== Phase 3: stop/remove engines + pump legacy services =="
 
 docker compose -f docker-compose.yml -f docker-compose.bots.yml stop \
+  nautilus_paper_engine \
+  nautilus_live_engine \
   mina_pump_bot \
-  mina_live_bot mina_live_monitor \
-  mina_paper_bot mina_paper_monitor || true
+  mina_pump_monitor || true
 
 docker compose -f docker-compose.yml -f docker-compose.bots.yml rm -f \
+  nautilus_paper_engine \
+  nautilus_live_engine \
   mina_pump_bot \
-  mina_live_bot mina_live_monitor \
-  mina_paper_bot mina_paper_monitor || true
+  mina_pump_monitor || true
 
 echo "== docker compose ps =="
 docker compose -f docker-compose.yml -f docker-compose.bots.yml ps
