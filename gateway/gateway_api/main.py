@@ -28,6 +28,7 @@ from fastapi.staticfiles import StaticFiles
 
 from gateway_api.contracts_v1 import json_schema as contracts_v1_schema
 from gateway_api import mina_pg
+from gateway_api import observability as unified_observability
 from gateway_api.control_live import build_router as build_control_live_router
 from gateway_api.observability_routes import build_router as build_observability_router
 
@@ -5781,6 +5782,188 @@ app.include_router(
         audit_write=_audit_write,
     )
 )
+
+
+@app.get("/api/control/live/readiness")
+async def api_control_live_readiness():
+    generated_at = _utc_iso_now()
+    checks: list[dict[str, Any]] = []
+    errors: list[dict[str, Any]] = []
+    sources: dict[str, Any] = {
+        "live_status": None,
+        "observability_live": None,
+        "dead_letters_live": None,
+        "commands_live": None,
+    }
+
+    # Source: live status
+    live_status: dict[str, Any] = {}
+    try:
+        live_status = {"ok": True, **_live_gate_status(include_token=False)}
+        sources["live_status"] = live_status
+    except Exception as exc:
+        errors.append({"source": "live_status", "error": f"{type(exc).__name__}: {exc}"})
+        live_status = {}
+
+    gate = dict(live_status.get("gate") or {})
+    kill_switch = dict(live_status.get("kill_switch") or {})
+    allowlist = list(live_status.get("allowlist") or [])
+    limits = dict(live_status.get("limits") or {})
+
+    gate_state = str(gate.get("state") or "DISARMED").upper()
+    checks.append({"id": "live_gate_confirmed", "ok": gate_state == "CONFIRMED", "detail": gate_state})
+
+    ks_on = bool(kill_switch.get("enabled"))
+    ks_reason = str(kill_switch.get("reason") or "").strip()
+    checks.append({"id": "kill_switch_off", "ok": not ks_on, "detail": ("" if not ks_on else ks_reason or "kill_switch_on")})
+
+    allow_count = len([s for s in allowlist if str(s or "").strip()])
+    checks.append({"id": "allowlist_nonempty", "ok": allow_count > 0, "detail": f"count={allow_count}"})
+
+    try:
+        max_open_positions = int(float(limits.get("max_open_positions", -1)))
+    except Exception:
+        max_open_positions = -1
+    try:
+        max_notional = float(limits.get("max_notional", -1))
+    except Exception:
+        max_notional = -1.0
+    try:
+        max_daily_loss = float(limits.get("max_daily_loss", -1))
+    except Exception:
+        max_daily_loss = -1.0
+    limits_ok = max_open_positions >= 0 and max_notional > 0 and max_daily_loss > 0
+    checks.append(
+        {
+            "id": "limits_set",
+            "ok": limits_ok,
+            "detail": (
+                f"max_open_positions={max_open_positions} "
+                f"max_notional={max_notional} "
+                f"max_daily_loss={max_daily_loss}"
+            ),
+        }
+    )
+
+    # Source: unified observability (live role)
+    obs_payload: dict[str, Any] = {}
+    obs_item: dict[str, Any] = {}
+    obs_errors_count = 0
+    try:
+        obs_payload = await asyncio.to_thread(
+            unified_observability.build_unified_observability,
+            AUDIT_DSN,
+            ["live"],
+        )
+        sources["observability_live"] = obs_payload
+        items = obs_payload.get("items") if isinstance(obs_payload, dict) else []
+        if isinstance(items, list) and items:
+            obs_item = dict(items[0] or {})
+        obs_errors = obs_payload.get("errors") if isinstance(obs_payload, dict) else []
+        obs_errors_count = len(obs_errors) if isinstance(obs_errors, list) else 0
+    except Exception as exc:
+        errors.append({"source": "observability_live", "error": f"{type(exc).__name__}: {exc}"})
+        obs_payload = {}
+        obs_item = {}
+        obs_errors_count = 0
+
+    engine = dict(obs_item.get("engine") or {})
+    engine_online = bool(engine.get("online"))
+    last_seen_seconds = engine.get("last_seen_seconds")
+    checks.append(
+        {
+            "id": "engine_online",
+            "ok": engine_online,
+            "detail": f"last_seen_seconds={last_seen_seconds if last_seen_seconds is not None else 'unknown'}",
+        }
+    )
+    checks.append({"id": "observability_errors_ok", "ok": obs_errors_count == 0, "detail": f"errors_count={obs_errors_count}"})
+
+    # Source: live dead letters
+    dead_letters_live: dict[str, Any] = {}
+    dead_count = 0
+    try:
+        dead_letters_live = await api_unified_dead_letters(role="live", limit=50)
+        sources["dead_letters_live"] = dead_letters_live
+        dead_count = int(dead_letters_live.get("count") or len(dead_letters_live.get("items") or []))
+    except Exception as exc:
+        errors.append({"source": "dead_letters_live", "error": f"{type(exc).__name__}: {exc}"})
+        dead_letters_live = {}
+        dead_count = 0
+    checks.append({"id": "dead_letters_zero", "ok": dead_count == 0, "detail": str(dead_count)})
+
+    # Source: live commands
+    commands_live: dict[str, Any] = {}
+    pending_count = 0
+    failed_count = 0
+    try:
+        commands_live = await api_unified_commands_list(role="live", limit=50, status=None)
+        sources["commands_live"] = commands_live
+        items = commands_live.get("items") if isinstance(commands_live, dict) else []
+        if not isinstance(items, list):
+            items = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            st = str(item.get("status") or "").strip().upper()
+            if st in {"PENDING", "CLAIMED"}:
+                pending_count += 1
+            if st == "FAILED":
+                failed_count += 1
+    except Exception as exc:
+        errors.append({"source": "commands_live", "error": f"{type(exc).__name__}: {exc}"})
+        commands_live = {}
+        pending_count = 0
+        failed_count = 0
+    checks.append(
+        {
+            "id": "command_backlog_ok",
+            "ok": pending_count == 0 and failed_count == 0,
+            "detail": f"pending={pending_count} failed={failed_count}",
+        }
+    )
+
+    # Optional Brain reachability check (does not block overall readiness).
+    brain_ok = True
+    brain_detail = "nullable"
+    try:
+        brain_overview = await _brain_get_json("/api/overview")
+        if isinstance(brain_overview, dict):
+            status_txt = str(
+                brain_overview.get("status")
+                or brain_overview.get("ok")
+                or brain_overview.get("service")
+                or "available"
+            )
+            brain_detail = status_txt
+        else:
+            brain_detail = "available"
+    except Exception as exc:
+        brain_ok = False
+        brain_detail = f"unavailable: {type(exc).__name__}"
+        errors.append({"source": "brain_optional", "error": f"{type(exc).__name__}: {exc}"})
+    checks.append({"id": "brain_optional", "ok": brain_ok, "detail": brain_detail})
+
+    blocking_ids = {
+        "live_gate_confirmed",
+        "kill_switch_off",
+        "allowlist_nonempty",
+        "limits_set",
+        "engine_online",
+        "dead_letters_zero",
+        "command_backlog_ok",
+        "observability_errors_ok",
+    }
+    ready = all(bool(ch.get("ok")) for ch in checks if str(ch.get("id")) in blocking_ids)
+
+    return {
+        "ok": True,
+        "generated_at": generated_at,
+        "ready": bool(ready),
+        "checks": checks,
+        "sources": sources,
+        "errors": errors,
+    }
 
 
 def _strategies_payload(role: str = "all") -> Dict[str, Any]:
