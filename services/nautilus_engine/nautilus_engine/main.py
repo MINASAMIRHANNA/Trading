@@ -942,7 +942,7 @@ def run_loop() -> None:
     role_targets = resolve_role_schemas()
 
     execution_mode = _env("EXECUTION_MODE", _env("NAUTILUS_MODE", "SIM")).strip().upper() or "SIM"
-    engine_id = _env("ENGINE_ID", _env("HOSTNAME", "nautilus_engine")).strip() or "nautilus_engine"
+    engine_id = _env("ENGINE_ID", _env("ENGINE_NAME", _env("HOSTNAME", "nautilus_engine"))).strip() or "nautilus_engine"
     poll_sec = max(1, safe_int(_env("NAUTILUS_POLL_SEC", "2"), 2))
     hb_sec = max(5, safe_int(_env("HEALTH_HEARTBEAT_SEC", "15"), 15))
     default_schema_version = _env("SIGNAL_SCHEMA_VERSION", "v1")
