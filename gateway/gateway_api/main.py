@@ -27,6 +27,7 @@ from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
 
 from gateway_api.contracts_v1 import json_schema as contracts_v1_schema
+from gateway_api import mina_pg
 
 from gateway_api.audit import ensure_audit_schema_and_table, get_dsn as _audit_get_dsn, insert_audit_event, new_trace_id, fetch_audit_events, fetch_audit_event_by_id
 from gateway_api.crypto import encrypt_json, decrypt_json, hash_secret
@@ -595,6 +596,7 @@ async def _startup():
     try:
         await asyncio.to_thread(ensure_audit_schema_and_table, AUDIT_DSN)
         await asyncio.to_thread(_ensure_gateway_phase4_tables, AUDIT_DSN)
+        await asyncio.to_thread(_ensure_strategy_risk_tables)
         await asyncio.to_thread(_ensure_live_policy_defaults)
         await asyncio.to_thread(_ensure_default_alert_rules)
         await asyncio.to_thread(
@@ -866,7 +868,7 @@ async def api_simulate(request: Request):
 
 @app.get("/api/stack/health")
 async def api_stack_health():
-    # Aggregate health from brain + 3 dashboards
+    # Aggregate health from brain + DB-backed Mina role snapshots.
     out = {"gateway": "ok", "brain": None, "dashboards": {}}
     # Brain
     try:
@@ -874,13 +876,13 @@ async def api_stack_health():
     except HTTPException as e:
         out["brain"] = _http_exc_detail(e)
 
-    # Dashboards system health
-    headers = {"X-API-Key": DASHBOARD_API_KEY}
-    for role, base in ROLE_URLS.items():
+    # Mina role health is sourced from Postgres (dashboard-free).
+    for role in ("paper", "live", "pump"):
         try:
-            out["dashboards"][role] = await _fetch_json(f"{base}/api/system_health", headers=headers)
-        except HTTPException as e:
-            out["dashboards"][role] = {"error": e.detail}
+            schema = _schema_for_role(role)
+            out["dashboards"][role] = mina_pg.build_system_health(schema, role)
+        except Exception as e:
+            out["dashboards"][role] = {"ok": False, "error": str(e), "schema": _schema_for_role(role)}
     return out
 
 
@@ -1101,6 +1103,7 @@ LIVE_CLOSING_COMMANDS = {
     "REDUCE_POSITION",
     "UPDATE_SLTP",
 }
+RUNTIME_EXECUTION_MODES = ("PAPER", "TEST")
 
 def _ensure_events_table(dsn: str) -> None:
     ddl = f"""
@@ -1998,6 +2001,760 @@ def _upsert_settings(schema: str, payload: Dict[str, Any], source: str = "gatewa
     return updated
 
 
+def _as_optional_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    txt = str(value).strip()
+    if not txt:
+        return None
+    try:
+        return float(txt)
+    except Exception:
+        return None
+
+
+def _strategy_registry_defaults() -> list[dict[str, Any]]:
+    return [
+        {
+            "strategy_id": "BASELINE_SCALP",
+            "name": "Baseline Scalp",
+            "role_scope": ["paper", "live"],
+            "version": "v1",
+            "description": "Short-horizon baseline strategy for rapid entries/exits.",
+            "tags": ["baseline", "scalp"],
+        },
+        {
+            "strategy_id": "BASELINE_SWING",
+            "name": "Baseline Swing",
+            "role_scope": ["paper", "live"],
+            "version": "v1",
+            "description": "Swing-oriented baseline strategy for multi-candle opportunities.",
+            "tags": ["baseline", "swing"],
+        },
+        {
+            "strategy_id": "PUMP_HUNTER_PROMOTE",
+            "name": "Pump Hunter Promote",
+            "role_scope": ["pump", "paper", "live"],
+            "version": "v1",
+            "description": "Signal-only pump candidate promotion flow from pump to execution roles.",
+            "tags": ["pump", "promote"],
+        },
+        {
+            "strategy_id": "NO_TRADE",
+            "name": "No Trade Gate",
+            "role_scope": ["paper", "live", "pump"],
+            "version": "v1",
+            "description": "Protective gate that explicitly vetoes trading in invalid conditions.",
+            "tags": ["gate", "safety"],
+        },
+    ]
+
+
+def _risk_profile_defaults() -> list[dict[str, Any]]:
+    return [
+        {
+            "profile_id": "paper_conservative",
+            "name": "Paper Conservative",
+            "params_json": {
+                "account_size_usd": 10000,
+                "max_concurrent_positions": 3,
+                "max_notional_per_trade": 750,
+                "max_daily_loss_pct": 6.0,
+                "max_drawdown_pct": 15.0,
+                "max_loss_streak": 4,
+                "cooldown_sec": 30,
+                "min_confidence": 0.55,
+                "min_score": 0.55,
+                "atr_pct_min": 0.0005,
+                "atr_pct_max": 0.12,
+                "regime_allow": ["TREND_UP", "TREND_MIXED", "RANGE"],
+            },
+        },
+        {
+            "profile_id": "live_shadow",
+            "name": "Live Shadow (TEST-only)",
+            "params_json": {
+                "account_size_usd": 5000,
+                "max_concurrent_positions": 1,
+                "max_notional_per_trade": 250,
+                "max_daily_loss_pct": 2.0,
+                "max_drawdown_pct": 5.0,
+                "max_loss_streak": 2,
+                "cooldown_sec": 90,
+                "min_confidence": 0.70,
+                "min_score": 0.70,
+                "atr_pct_min": 0.0005,
+                "atr_pct_max": 0.08,
+                "regime_allow": ["TREND_UP", "RANGE"],
+            },
+        },
+        {
+            "profile_id": "pump_signal_only",
+            "name": "Pump Signal Only",
+            "params_json": {
+                "max_concurrent_positions": 0,
+                "max_notional_per_trade": 0,
+                "max_daily_loss_pct": 0,
+                "max_drawdown_pct": 0,
+                "max_loss_streak": 0,
+                "cooldown_sec": 0,
+                "min_confidence": 0.0,
+                "min_score": 0.0,
+                "regime_allow": [],
+            },
+        },
+    ]
+
+
+def _role_runtime_defaults() -> list[dict[str, Any]]:
+    return [
+        {
+            "role": "paper",
+            "active_risk_profile": "paper_conservative",
+            "execution_mode": "PAPER",
+            "allow_auto_approve": False,
+            "allow_manual_execute": True,
+        },
+        {
+            "role": "live",
+            "active_risk_profile": "live_shadow",
+            "execution_mode": "TEST",
+            "allow_auto_approve": False,
+            "allow_manual_execute": True,
+        },
+        {
+            "role": "pump",
+            "active_risk_profile": "pump_signal_only",
+            "execution_mode": "TEST",
+            "allow_auto_approve": False,
+            "allow_manual_execute": False,
+        },
+    ]
+
+
+def _strategy_config_defaults() -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for role in ("paper", "live", "pump"):
+        rows.append(
+            {
+                "strategy_id": "BASELINE_SCALP",
+                "role": role,
+                "enabled": role in {"paper", "live"},
+                "params_json": {},
+                "min_confidence": 0.55 if role == "paper" else 0.7,
+                "min_score": 0.55 if role == "paper" else 0.7,
+                "max_positions": 3 if role == "paper" else 1,
+                "cooldown_sec": 30 if role == "paper" else 90,
+            }
+        )
+        rows.append(
+            {
+                "strategy_id": "BASELINE_SWING",
+                "role": role,
+                "enabled": role in {"paper", "live"},
+                "params_json": {},
+                "min_confidence": 0.52 if role == "paper" else 0.68,
+                "min_score": 0.52 if role == "paper" else 0.68,
+                "max_positions": 3 if role == "paper" else 1,
+                "cooldown_sec": 60 if role == "paper" else 120,
+            }
+        )
+        rows.append(
+            {
+                "strategy_id": "PUMP_HUNTER_PROMOTE",
+                "role": role,
+                "enabled": role in {"pump", "paper", "live"},
+                "params_json": {},
+                "min_confidence": 0.6,
+                "min_score": 0.6,
+                "max_positions": 2 if role == "paper" else 1,
+                "cooldown_sec": 20,
+            }
+        )
+        rows.append(
+            {
+                "strategy_id": "NO_TRADE",
+                "role": role,
+                "enabled": False,
+                "params_json": {},
+                "min_confidence": None,
+                "min_score": None,
+                "max_positions": None,
+                "cooldown_sec": None,
+            }
+        )
+    return rows
+
+
+def _ensure_strategy_risk_tables() -> None:
+    ddl = """
+    CREATE SCHEMA IF NOT EXISTS brain;
+    CREATE TABLE IF NOT EXISTS brain.strategy_registry (
+      strategy_id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      role_scope TEXT[] NOT NULL DEFAULT ARRAY['paper'],
+      version TEXT NOT NULL DEFAULT 'v1',
+      description TEXT,
+      tags JSONB NOT NULL DEFAULT '[]'::jsonb,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+    CREATE TABLE IF NOT EXISTS brain.strategy_config (
+      strategy_id TEXT NOT NULL,
+      role TEXT NOT NULL,
+      enabled BOOLEAN NOT NULL DEFAULT TRUE,
+      params_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+      min_confidence DOUBLE PRECISION,
+      min_score DOUBLE PRECISION,
+      max_positions INTEGER,
+      cooldown_sec INTEGER,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      PRIMARY KEY(strategy_id, role)
+    );
+    CREATE TABLE IF NOT EXISTS brain.risk_profile (
+      profile_id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      params_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+    CREATE TABLE IF NOT EXISTS brain.role_runtime (
+      role TEXT PRIMARY KEY,
+      active_risk_profile TEXT,
+      execution_mode TEXT NOT NULL DEFAULT 'PAPER',
+      allow_auto_approve BOOLEAN NOT NULL DEFAULT FALSE,
+      allow_manual_execute BOOLEAN NOT NULL DEFAULT TRUE,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+    CREATE INDEX IF NOT EXISTS idx_brain_strategy_config_role
+      ON brain.strategy_config(role, strategy_id);
+    """
+    with psycopg.connect(AUDIT_DSN, autocommit=True) as conn:
+        with conn.cursor() as cur:
+            cur.execute(ddl)
+            for row in _strategy_registry_defaults():
+                cur.execute(
+                    """
+                    INSERT INTO brain.strategy_registry
+                    (strategy_id, name, role_scope, version, description, tags)
+                    VALUES (%s, %s, %s, %s, %s, %s::jsonb)
+                    ON CONFLICT (strategy_id) DO UPDATE
+                    SET name = EXCLUDED.name,
+                        role_scope = EXCLUDED.role_scope,
+                        version = EXCLUDED.version,
+                        description = EXCLUDED.description,
+                        tags = EXCLUDED.tags
+                    """,
+                    (
+                        str(row["strategy_id"]),
+                        str(row["name"]),
+                        list(row.get("role_scope") or []),
+                        str(row.get("version") or "v1"),
+                        str(row.get("description") or ""),
+                        json.dumps(row.get("tags") or [], ensure_ascii=True),
+                    ),
+                )
+            for row in _risk_profile_defaults():
+                cur.execute(
+                    """
+                    INSERT INTO brain.risk_profile
+                    (profile_id, name, params_json)
+                    VALUES (%s, %s, %s::jsonb)
+                    ON CONFLICT (profile_id) DO UPDATE
+                    SET name = EXCLUDED.name,
+                        params_json = EXCLUDED.params_json,
+                        updated_at = now()
+                    """,
+                    (
+                        str(row["profile_id"]),
+                        str(row["name"]),
+                        json.dumps(row.get("params_json") or {}, ensure_ascii=True),
+                    ),
+                )
+            for row in _role_runtime_defaults():
+                cur.execute(
+                    """
+                    INSERT INTO brain.role_runtime
+                    (role, active_risk_profile, execution_mode, allow_auto_approve, allow_manual_execute)
+                    VALUES (%s, %s, %s, %s, %s)
+                    ON CONFLICT (role) DO NOTHING
+                    """,
+                    (
+                        str(row["role"]),
+                        str(row["active_risk_profile"]),
+                        str(row["execution_mode"]),
+                        bool(row.get("allow_auto_approve", False)),
+                        bool(row.get("allow_manual_execute", True)),
+                    ),
+                )
+            for row in _strategy_config_defaults():
+                cur.execute(
+                    """
+                    INSERT INTO brain.strategy_config
+                    (strategy_id, role, enabled, params_json, min_confidence, min_score, max_positions, cooldown_sec)
+                    VALUES (%s, %s, %s, %s::jsonb, %s, %s, %s, %s)
+                    ON CONFLICT (strategy_id, role) DO NOTHING
+                    """,
+                    (
+                        str(row["strategy_id"]),
+                        str(row["role"]),
+                        bool(row.get("enabled", True)),
+                        json.dumps(row.get("params_json") or {}, ensure_ascii=True),
+                        _as_optional_float(row.get("min_confidence")),
+                        _as_optional_float(row.get("min_score")),
+                        (None if row.get("max_positions") is None else int(row.get("max_positions"))),
+                        (None if row.get("cooldown_sec") is None else int(row.get("cooldown_sec"))),
+                    ),
+                )
+
+
+def _strategy_registry_rows() -> list[dict[str, Any]]:
+    _ensure_strategy_risk_tables()
+    with psycopg.connect(AUDIT_DSN, autocommit=True, row_factory=dict_row) as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM brain.strategy_registry ORDER BY strategy_id ASC")
+            rows = [dict(r) for r in (cur.fetchall() or [])]
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        rr = dict(row)
+        rr["role_scope"] = list(rr.get("role_scope") or [])
+        tags = rr.get("tags")
+        if not isinstance(tags, list):
+            tags = _safe_json_loads(tags, [])
+        rr["tags"] = tags if isinstance(tags, list) else []
+        out.append(rr)
+    return out
+
+
+def _strategy_config_rows(role: str | None = None) -> list[dict[str, Any]]:
+    _ensure_strategy_risk_tables()
+    where = ""
+    params: list[Any] = []
+    if role and role not in {"all", "*"}:
+        where = "WHERE role = %s"
+        params.append(_validate_role(role))
+    with psycopg.connect(AUDIT_DSN, autocommit=True, row_factory=dict_row) as conn:
+        with conn.cursor() as cur:
+            cur.execute(f"SELECT * FROM brain.strategy_config {where} ORDER BY role ASC, strategy_id ASC", params)
+            rows = [dict(r) for r in (cur.fetchall() or [])]
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        rr = dict(row)
+        rr["enabled"] = bool(rr.get("enabled"))
+        params_json = rr.get("params_json")
+        if not isinstance(params_json, dict):
+            params_json = _safe_json_loads(params_json, {})
+        rr["params_json"] = params_json if isinstance(params_json, dict) else {}
+        out.append(rr)
+    return out
+
+
+def _risk_profile_rows() -> list[dict[str, Any]]:
+    _ensure_strategy_risk_tables()
+    with psycopg.connect(AUDIT_DSN, autocommit=True, row_factory=dict_row) as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM brain.risk_profile ORDER BY profile_id ASC")
+            rows = [dict(r) for r in (cur.fetchall() or [])]
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        rr = dict(row)
+        params_json = rr.get("params_json")
+        if not isinstance(params_json, dict):
+            params_json = _safe_json_loads(params_json, {})
+        rr["params_json"] = params_json if isinstance(params_json, dict) else {}
+        out.append(rr)
+    return out
+
+
+def _risk_profile_by_id(profile_id: str | None) -> dict[str, Any]:
+    rows = _risk_profile_rows()
+    pid = str(profile_id or "").strip()
+    for row in rows:
+        if str(row.get("profile_id") or "") == pid:
+            return row
+    return {"profile_id": pid, "name": pid or "unknown", "params_json": {}}
+
+
+def _role_runtime_rows(role: str | None = None) -> list[dict[str, Any]]:
+    _ensure_strategy_risk_tables()
+    where = ""
+    params: list[Any] = []
+    if role and role not in {"all", "*"}:
+        where = "WHERE role = %s"
+        params.append(_validate_role(role))
+    with psycopg.connect(AUDIT_DSN, autocommit=True, row_factory=dict_row) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT role, active_risk_profile, execution_mode, allow_auto_approve, allow_manual_execute, updated_at
+                FROM brain.role_runtime
+                {where}
+                ORDER BY role ASC
+                """,
+                params,
+            )
+            rows = [dict(r) for r in (cur.fetchall() or [])]
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        rr = dict(row)
+        rr["allow_auto_approve"] = bool(rr.get("allow_auto_approve"))
+        rr["allow_manual_execute"] = bool(rr.get("allow_manual_execute"))
+        rr["execution_mode"] = str(rr.get("execution_mode") or "PAPER").upper()
+        out.append(rr)
+    return out
+
+
+def _role_runtime_get(role: str) -> dict[str, Any]:
+    r = _validate_role(role)
+    rows = _role_runtime_rows(r)
+    if rows:
+        return rows[0]
+    fallback = next((x for x in _role_runtime_defaults() if x.get("role") == r), None) or {}
+    with psycopg.connect(AUDIT_DSN, autocommit=True) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO brain.role_runtime
+                (role, active_risk_profile, execution_mode, allow_auto_approve, allow_manual_execute)
+                VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT (role) DO NOTHING
+                """,
+                (
+                    r,
+                    str(fallback.get("active_risk_profile") or "paper_conservative"),
+                    str(fallback.get("execution_mode") or "PAPER"),
+                    bool(fallback.get("allow_auto_approve", False)),
+                    bool(fallback.get("allow_manual_execute", True)),
+                ),
+            )
+    rows = _role_runtime_rows(r)
+    return rows[0] if rows else {
+        "role": r,
+        "active_risk_profile": str(fallback.get("active_risk_profile") or "paper_conservative"),
+        "execution_mode": str(fallback.get("execution_mode") or "PAPER"),
+        "allow_auto_approve": bool(fallback.get("allow_auto_approve", False)),
+        "allow_manual_execute": bool(fallback.get("allow_manual_execute", True)),
+    }
+
+
+def _strategy_config_map(role: str) -> Dict[str, Dict[str, Any]]:
+    rows = _strategy_config_rows(role)
+    return {str(r.get("strategy_id") or "").upper(): r for r in rows}
+
+
+def _role_trade_runtime_metrics(role: str) -> Dict[str, Any]:
+    schema = _schema_for_role(role)
+    out: Dict[str, Any] = {
+        "role": role,
+        "schema": schema,
+        "open_positions": 0,
+        "daily_realized_pnl": 0.0,
+        "loss_streak": 0,
+        "drawdown_pct": 0.0,
+        "last_trade_action_ms": None,
+        "last_trade_action_age_sec": None,
+    }
+    if not _table_exists(schema, "trades"):
+        return out
+    cols = _table_columns(schema, "trades")
+    status_col = "status" if "status" in cols else None
+    pnl_col = "pnl" if "pnl" in cols else ("realized_pnl" if "realized_pnl" in cols else None)
+    time_num_col = "closed_at_ms" if "closed_at_ms" in cols else ("updated_at_ms" if "updated_at_ms" in cols else ("timestamp_ms" if "timestamp_ms" in cols else None))
+    time_txt_col = "closed_at" if "closed_at" in cols else ("updated_at" if "updated_at" in cols else ("timestamp" if "timestamp" in cols else None))
+    open_where = "UPPER(COALESCE(status,''))='OPEN'" if status_col else "TRUE"
+    closed_where = "UPPER(COALESCE(status,''))='CLOSED'" if status_col else "TRUE"
+
+    with psycopg.connect(AUDIT_DSN, autocommit=True, row_factory=dict_row) as conn:
+        with conn.cursor() as cur:
+            cur.execute(f"SELECT COUNT(*) AS n FROM {schema}.trades WHERE {open_where}")
+            out["open_positions"] = int((cur.fetchone() or {}).get("n") or 0)
+
+            if pnl_col:
+                day_start_ms = _now_utc_start_ms()
+                day_start_iso = _safe_iso_from_ms(day_start_ms)
+                where_parts = [closed_where]
+                params: list[Any] = []
+                if time_num_col:
+                    where_parts.append(f"{time_num_col} >= %s")
+                    params.append(day_start_ms)
+                elif time_txt_col and day_start_iso:
+                    where_parts.append(f"{time_txt_col} >= %s")
+                    params.append(day_start_iso)
+                cur.execute(
+                    f"SELECT COALESCE(SUM(COALESCE({pnl_col},0)),0) AS pnl FROM {schema}.trades WHERE {' AND '.join(where_parts)}",
+                    params,
+                )
+                out["daily_realized_pnl"] = float((cur.fetchone() or {}).get("pnl") or 0.0)
+
+                cur.execute(
+                    f"SELECT COALESCE({pnl_col},0) AS pnl FROM {schema}.trades WHERE {closed_where} ORDER BY id DESC LIMIT 50"
+                )
+                seq = [float((r or {}).get("pnl") or 0.0) for r in (cur.fetchall() or [])]
+                streak = 0
+                for pnl in seq:
+                    if pnl < 0:
+                        streak += 1
+                    else:
+                        break
+                out["loss_streak"] = streak
+
+                cur.execute(
+                    f"SELECT COALESCE({pnl_col},0) AS pnl FROM {schema}.trades WHERE {closed_where} ORDER BY id ASC LIMIT 2000"
+                )
+                pnl_rows = [float((r or {}).get("pnl") or 0.0) for r in (cur.fetchall() or [])]
+                eq = 0.0
+                peak = 0.0
+                max_dd = 0.0
+                for pnl in pnl_rows:
+                    eq += pnl
+                    peak = max(peak, eq)
+                    if peak > 0:
+                        dd = ((peak - eq) / peak) * 100.0
+                        max_dd = max(max_dd, dd)
+                out["drawdown_pct"] = round(max_dd, 4)
+
+            last_ms: int | None = None
+            if time_num_col:
+                cur.execute(f"SELECT COALESCE(MAX({time_num_col}),0) AS m FROM {schema}.trades")
+                m = int((cur.fetchone() or {}).get("m") or 0)
+                if m > 0:
+                    last_ms = m
+            elif time_txt_col:
+                cur.execute(f"SELECT {time_txt_col} AS t FROM {schema}.trades ORDER BY id DESC LIMIT 1")
+                row = cur.fetchone() or {}
+                last_ms = _parse_ts_ms(str(row.get("t") or ""))
+            out["last_trade_action_ms"] = last_ms
+            if last_ms:
+                out["last_trade_action_age_sec"] = max(0, int((_ms_now() - int(last_ms)) / 1000))
+    return out
+
+
+def _strategy_risk_eval(role: str, signal: Dict[str, Any], *, action: str) -> Dict[str, Any]:
+    r = _validate_role(role)
+    _ensure_strategy_risk_tables()
+    strategy_id = str(signal.get("strategy") or signal.get("strategy_tag") or "").strip().upper() or "BASELINE_SCALP"
+    confidence = _as_float(signal.get("confidence"), 0.0)
+    score = _as_float(signal.get("score"), confidence)
+    proposed_notional = _as_float(signal.get("amount_usd") or signal.get("notional"), 0.0)
+    regime = str(signal.get("regime") or signal.get("regime_label") or "").strip().upper()
+    atr_pct = _as_optional_float(signal.get("atr_pct"))
+    volume = _as_optional_float(signal.get("volume"))
+
+    runtime_cfg = _role_runtime_get(r)
+    runtime_metrics = _role_trade_runtime_metrics(r)
+    strategy_map = _strategy_config_map(r)
+    strategy_cfg = strategy_map.get(strategy_id) or {}
+    risk_profile = _risk_profile_by_id(runtime_cfg.get("active_risk_profile"))
+    params = risk_profile.get("params_json")
+    if not isinstance(params, dict):
+        params = {}
+
+    violations: list[dict[str, Any]] = []
+    mode = str(runtime_cfg.get("execution_mode") or "PAPER").upper()
+    if mode not in RUNTIME_EXECUTION_MODES:
+        violations.append(
+            {"code": "execution_mode_block", "message": f"Role execution_mode={mode} is not allowed in pre-LIVE mode."}
+        )
+    if str(action).upper() == "MANUAL_EXECUTE" and not bool(runtime_cfg.get("allow_manual_execute", True)):
+        violations.append({"code": "manual_execute_disabled", "message": "Manual execution is disabled for this role."})
+
+    settings = _fetch_settings(_schema_for_role(r), ["kill_switch"])
+    if _as_bool(settings.get("kill_switch"), False):
+        violations.append({"code": "kill_switch_on", "message": "Kill switch is enabled; opening trades is blocked."})
+
+    if strategy_cfg:
+        if not bool(strategy_cfg.get("enabled", True)):
+            violations.append({"code": "strategy_disabled", "message": f"Strategy {strategy_id} is disabled for role={r}."})
+        min_conf_cfg = _as_optional_float(strategy_cfg.get("min_confidence"))
+        if min_conf_cfg is not None and confidence < min_conf_cfg:
+            violations.append(
+                {"code": "strategy_min_confidence", "message": f"confidence {confidence:.4f} < strategy min_confidence {min_conf_cfg:.4f}"}
+            )
+        min_score_cfg = _as_optional_float(strategy_cfg.get("min_score"))
+        if min_score_cfg is not None and score < min_score_cfg:
+            violations.append(
+                {"code": "strategy_min_score", "message": f"score {score:.4f} < strategy min_score {min_score_cfg:.4f}"}
+            )
+        max_pos_cfg = strategy_cfg.get("max_positions")
+        if max_pos_cfg is not None and str(max_pos_cfg).strip() != "":
+            max_pos = int(max(0, _as_int(max_pos_cfg, 0)))
+            if max_pos > 0 and int(runtime_metrics.get("open_positions") or 0) >= max_pos:
+                violations.append({"code": "strategy_max_positions", "message": f"open_positions reached strategy cap {max_pos}"})
+        cooldown_cfg = strategy_cfg.get("cooldown_sec")
+        if cooldown_cfg is not None and str(cooldown_cfg).strip() != "":
+            cool = int(max(0, _as_int(cooldown_cfg, 0)))
+            age_sec = _as_int(runtime_metrics.get("last_trade_action_age_sec"), 0)
+            if cool > 0 and age_sec < cool:
+                violations.append({"code": "strategy_cooldown", "message": f"strategy cooldown active ({age_sec}s/{cool}s)"})
+
+    max_concurrent = int(max(0, _as_int(params.get("max_concurrent_positions"), 0)))
+    if max_concurrent > 0 and int(runtime_metrics.get("open_positions") or 0) >= max_concurrent:
+        violations.append({"code": "max_concurrent_positions", "message": f"open_positions reached risk cap {max_concurrent}"})
+
+    max_notional = _as_float(params.get("max_notional_per_trade"), 0.0)
+    if max_notional > 0 and proposed_notional > 0 and proposed_notional > max_notional:
+        violations.append(
+            {"code": "max_notional_per_trade", "message": f"notional {proposed_notional:.2f} exceeds cap {max_notional:.2f}"}
+        )
+
+    account_size = max(1.0, _as_float(params.get("account_size_usd"), 10000.0))
+    daily_loss_pct = _as_float(params.get("max_daily_loss_pct"), 0.0)
+    daily_pnl_pct = (float(runtime_metrics.get("daily_realized_pnl") or 0.0) / account_size) * 100.0
+    runtime_metrics["daily_pnl_pct"] = round(daily_pnl_pct, 4)
+    if daily_loss_pct > 0 and daily_pnl_pct <= -abs(daily_loss_pct):
+        violations.append(
+            {"code": "max_daily_loss_pct", "message": f"daily pnl {daily_pnl_pct:.2f}% breached {daily_loss_pct:.2f}%"}
+        )
+
+    max_dd_pct = _as_float(params.get("max_drawdown_pct"), 0.0)
+    if max_dd_pct > 0 and _as_float(runtime_metrics.get("drawdown_pct"), 0.0) > max_dd_pct:
+        violations.append(
+            {
+                "code": "max_drawdown_pct",
+                "message": f"drawdown {_as_float(runtime_metrics.get('drawdown_pct'), 0.0):.2f}% > {max_dd_pct:.2f}%",
+            }
+        )
+
+    max_loss_streak = int(max(0, _as_int(params.get("max_loss_streak"), 0)))
+    if max_loss_streak > 0 and int(runtime_metrics.get("loss_streak") or 0) >= max_loss_streak:
+        violations.append(
+            {"code": "max_loss_streak", "message": f"loss_streak={runtime_metrics.get('loss_streak')} >= {max_loss_streak}"}
+        )
+
+    cooldown_sec = int(max(0, _as_int(params.get("cooldown_sec"), 0)))
+    if cooldown_sec > 0:
+        age_sec = _as_int(runtime_metrics.get("last_trade_action_age_sec"), 0)
+        if age_sec < cooldown_sec:
+            violations.append({"code": "risk_cooldown", "message": f"cooldown active ({age_sec}s/{cooldown_sec}s)"})
+
+    min_conf = _as_optional_float(params.get("min_confidence"))
+    if min_conf is not None and confidence < min_conf:
+        violations.append({"code": "risk_min_confidence", "message": f"confidence {confidence:.4f} < {min_conf:.4f}"})
+    min_score = _as_optional_float(params.get("min_score"))
+    if min_score is not None and score < min_score:
+        violations.append({"code": "risk_min_score", "message": f"score {score:.4f} < {min_score:.4f}"})
+
+    regime_allow = params.get("regime_allow")
+    if isinstance(regime_allow, list) and regime_allow and regime:
+        allowed = {str(x).strip().upper() for x in regime_allow if str(x).strip()}
+        if allowed and regime not in allowed:
+            violations.append({"code": "regime_filter", "message": f"regime {regime} not in allowed set"})
+
+    atr_pct_min = _as_optional_float(params.get("atr_pct_min"))
+    atr_pct_max = _as_optional_float(params.get("atr_pct_max"))
+    if atr_pct is not None and atr_pct_min is not None and atr_pct < atr_pct_min:
+        violations.append({"code": "atr_pct_min", "message": f"atr_pct {atr_pct:.6f} < {atr_pct_min:.6f}"})
+    if atr_pct is not None and atr_pct_max is not None and atr_pct > atr_pct_max:
+        violations.append({"code": "atr_pct_max", "message": f"atr_pct {atr_pct:.6f} > {atr_pct_max:.6f}"})
+
+    min_volume = _as_optional_float(params.get("min_volume"))
+    if min_volume is not None and volume is not None and volume < min_volume:
+        violations.append({"code": "min_volume", "message": f"volume {volume:.2f} < {min_volume:.2f}"})
+
+    return {
+        "ok": len(violations) == 0,
+        "role": r,
+        "action": str(action),
+        "strategy_id": strategy_id,
+        "strategy_config": strategy_cfg,
+        "runtime": runtime_cfg,
+        "risk_profile": risk_profile,
+        "metrics": runtime_metrics,
+        "violations": violations,
+    }
+
+
+def _insert_decision_trace(role: str, signal: Dict[str, Any], eval_out: Dict[str, Any], *, trace_id: str, gate: str, decision: str) -> int:
+    schema = _schema_for_role(role)
+    if not _table_exists(schema, "decision_traces"):
+        return 0
+    cols = _table_columns(schema, "decision_traces")
+    now_iso = _utc_iso_now()
+    now_ms = _ms_now()
+    strategy_id = str(eval_out.get("strategy_id") or signal.get("strategy") or "").strip().upper()
+    confidence = _as_float(signal.get("confidence"), 0.0)
+    score = _as_float(signal.get("score"), confidence)
+    risk_profile = eval_out.get("risk_profile")
+    if not isinstance(risk_profile, dict):
+        risk_profile = {}
+    min_conf = _as_optional_float(
+        (eval_out.get("strategy_config") or {}).get("min_confidence")
+    )
+    if min_conf is None:
+        min_conf = _as_optional_float((risk_profile.get("params_json") or {}).get("min_confidence"))
+
+    trace_payload = {
+        "trace_id": trace_id,
+        "decision_id": f"{trace_id}:{signal.get('inbox_id') or signal.get('id') or ''}",
+        "signal_id": int(signal.get("inbox_id") or signal.get("id") or 0),
+        "symbol": str(signal.get("symbol") or "").upper(),
+        "side": str(signal.get("side") or signal.get("signal") or "").upper(),
+        "action": eval_out.get("action"),
+        "gate": gate,
+        "decision": decision,
+        "strategy_id": strategy_id,
+        "runtime": eval_out.get("runtime") or {},
+        "risk_profile": risk_profile,
+        "metrics": eval_out.get("metrics") or {},
+        "violations": eval_out.get("violations") or [],
+        "enabled_strategies": {
+            str(k): bool(v.get("enabled"))
+            for k, v in _strategy_config_map(role).items()
+        },
+        "computed_indicators": {
+            "confidence": confidence,
+            "score": score,
+            "rsi": _as_optional_float(signal.get("rsi")),
+            "adx": _as_optional_float(signal.get("adx")),
+            "atr_pct": _as_optional_float(signal.get("atr_pct")),
+            "pump_score": _as_optional_float(signal.get("pump_score")),
+        },
+    }
+
+    fields: list[str] = []
+    values: list[Any] = []
+
+    def _add(col: str, val: Any) -> None:
+        if col in cols:
+            fields.append(col)
+            values.append(val)
+
+    _add("created_at", now_iso)
+    _add("created_at_ms", now_ms)
+    _add("symbol", str(signal.get("symbol") or "").upper())
+    _add("interval", str(signal.get("timeframe") or signal.get("interval") or ""))
+    _add("market_type", str(signal.get("market") or signal.get("market_type") or "futures"))
+    _add("strategy", strategy_id)
+    _add("gate", str(gate))
+    _add("exit_profile", str((risk_profile.get("profile_id") or "risk_profile")))
+    _add("decision", str(decision))
+    _add("conf_pct", confidence * 100.0)
+    _add("min_conf", min_conf)
+    _add("final_score", score)
+    _add("rule_signal", str(signal.get("side") or signal.get("signal") or ""))
+    _add("ai_vote", str(signal.get("ai_vote") or decision))
+    _add("ai_confidence", confidence)
+    _add("pump_score", _as_optional_float(signal.get("pump_score")))
+    _add("rsi", _as_optional_float(signal.get("rsi")))
+    _add("adx", _as_optional_float(signal.get("adx")))
+    _add("funding", _as_optional_float(signal.get("funding")))
+    _add("oi_change", _as_optional_float(signal.get("oi_change")))
+    _add("trace", json.dumps(trace_payload, ensure_ascii=True, default=str))
+
+    if not fields:
+        return 0
+    placeholders = ",".join(["%s"] * len(fields))
+    returning = " RETURNING id" if "id" in cols else ""
+    with psycopg.connect(AUDIT_DSN, autocommit=True, row_factory=dict_row) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"INSERT INTO {schema}.decision_traces ({', '.join(fields)}) VALUES ({placeholders}){returning}",
+                values,
+            )
+            if "id" in cols:
+                row = cur.fetchone() or {}
+                return int(row.get("id") or 0)
+    return 0
+
+
 def _fetch_signal_rows(
     schema: str,
     *,
@@ -2379,6 +3136,29 @@ def _approve_signal_from_db(role: str, signal_id: int, note: str = "", payload: 
     merged["_approved_by"] = "gateway"
     merged["_approved_at"] = _utc_iso_now()
     trace_id = uuid.uuid4().hex
+    eval_out = _strategy_risk_eval(role, merged, action="SIGNAL_APPROVE")
+    if not bool(eval_out.get("ok")):
+        first_msg = str(((eval_out.get("violations") or [{}])[0] or {}).get("message") or "strategy/risk gate blocked this signal")
+        _update_signal_status(schema, int(signal_id), "REJECTED", note=f"VETO: {first_msg}")
+        _insert_rejection(schema, symbol=str(merged.get("symbol") or "UNKNOWN"), reason=first_msg)
+        trace_row_id = _insert_decision_trace(
+            role,
+            merged,
+            eval_out,
+            trace_id=trace_id,
+            gate="BLOCK",
+            decision="NO_TRADE",
+        )
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "strategy_risk_veto",
+                "message": "Signal approval blocked by strategy/risk policy.",
+                "trace_id": trace_id,
+                "decision_trace_id": trace_row_id,
+                "evaluation": jsonable_encoder(eval_out),
+            },
+        )
     queued = _queue_role_command(
         role=role,
         cmd="EXECUTE_SIGNAL",
@@ -2387,6 +3167,14 @@ def _approve_signal_from_db(role: str, signal_id: int, note: str = "", payload: 
         request_payload={"signal_id": int(signal_id), "note": note, "payload": merged},
     )
     _update_signal_status(schema, int(signal_id), "APPROVED", note=note)
+    decision_trace_id = _insert_decision_trace(
+        role,
+        merged,
+        eval_out,
+        trace_id=trace_id,
+        gate="PASS",
+        decision="EXECUTE_SIGNAL",
+    )
     return {
         "ok": True,
         "status": "ok",
@@ -2394,6 +3182,8 @@ def _approve_signal_from_db(role: str, signal_id: int, note: str = "", payload: 
         "role": role,
         "schema": schema,
         "trace_id": trace_id,
+        "decision_trace_id": decision_trace_id,
+        "evaluation": eval_out,
         **queued,
     }
 
@@ -3159,37 +3949,16 @@ async def api_debug_routes():
 
 @app.get("/api/mina/{role}/system_health")
 async def mina_system_health(role: Role):
-    base = ROLE_URLS.get(role)
-    if not base:
-        raise HTTPException(status_code=404, detail="Unknown role")
-    headers = {"X-API-Key": DASHBOARD_API_KEY}
-    return await _fetch_json(f"{base}/api/system_health", headers=headers)
+    _validate_role(role)
+    schema = _schema_for_role(role)
+    return mina_pg.build_system_health(schema, role)
 
 
 @app.get("/api/mina/{role}/health")
 async def mina_health(role: Role):
-    """Health check for Mina dashboard.
-
-    In some Mina dashboard builds, `/health` serves an HTML login page (text/html)
-    instead of JSON, which breaks a JSON-only proxy. For the unified stack we
-    treat `/api/system_health` as the canonical JSON health endpoint.
-
-    This route provides a stable JSON health response for the role.
-    """
-    base = ROLE_URLS.get(role)
-    if not base:
-        raise HTTPException(status_code=404, detail="Unknown role")
-
-    headers = {"X-API-Key": DASHBOARD_API_KEY} if DASHBOARD_API_KEY else {}
-
-    # Canonical JSON health endpoint
-    try:
-        return await _fetch_json(f"{base}/api/system_health", headers=headers)
-    except HTTPException as e:
-        # Last resort: attempt `/health` but wrap non-JSON into a safe payload.
-        if getattr(e, "status_code", None) in (404, 405):
-            return await _fetch_json(f"{base}/health", headers=headers)
-        raise
+    _validate_role(role)
+    schema = _schema_for_role(role)
+    return mina_pg.build_system_health(schema, role)
 
 @app.get("/api/unified/roles")
 async def api_unified_roles():
@@ -3201,7 +3970,7 @@ async def api_unified_roles():
 
 @app.get("/api/unified/overview")
 async def api_unified_overview():
-    """Unified overview: Gateway + Brain + per-role dashboards + latest audit/events."""
+    """Unified overview: Gateway + Brain + DB-backed Mina role snapshots + latest audit/events."""
     out = {
         "schema_version": "v2",
         "ts_utc": None,
@@ -3227,10 +3996,16 @@ async def api_unified_overview():
 
     for role in ("paper", "live", "pump"):
         schema = _schema_for_role(role)
-        role_out = {"stats": None, "signals_preview": None, "system_health": None, "schema": schema}
-        role_out["system_health"] = await api_unified_role_system_health(role)  # type: ignore[arg-type]
-        role_out["stats"] = await api_unified_role_stats(role)  # type: ignore[arg-type]
-        role_out["signals_preview"] = {"items": _fetch_signal_rows(schema, limit=5), "count": len(_fetch_signal_rows(schema, limit=5))}
+        role_stats = mina_pg.get_stats(schema)
+        role_stats.setdefault("trades", int(role_stats.get("total_trades") or role_stats.get("trades") or 0))
+        signals_preview = mina_pg.list_signals(schema, limit=5)
+        role_out = {
+            "stats": role_stats,
+            "signals_preview": signals_preview,
+            "signals_preview_count": len(signals_preview),
+            "system_health": mina_pg.build_system_health(schema, role),
+            "schema": schema,
+        }
         out["dashboards"][role] = role_out
 
     # Latest audit/events (best-effort)
@@ -3450,80 +4225,38 @@ async def api_unified_sync_status(role: str = "paper"):
 
 @app.get("/api/unified/{role}/snapshot")
 async def api_unified_role_snapshot(role: Role):
-    """One-call snapshot for a single dashboard role."""
-    schema = _schema_for_role(role)
-    out = {"schema_version": "v2", "role": role, "schema": schema, "system_health": None, "stats": None, "positions": None, "signals": None}
-    out["system_health"] = await api_unified_role_system_health(role)
-    out["stats"] = await api_unified_role_stats(role)
-    positions = await api_ops_positions(role=role, limit=100)
-    out["positions"] = positions.get("items") or []
-    sigs = _fetch_signal_rows(schema, limit=10)
-    out["signals"] = {"items": sigs, "count": len(sigs)}
-    return out
+    """One-call snapshot for a single Mina role, sourced from Postgres."""
+    _validate_role(role)
+    return mina_pg.snapshot(role, signal_limit=10, position_limit=200)
 
 
 
 @app.get("/api/unified/{role}/system_health")
 async def api_unified_role_system_health(role: Role):
     schema = _schema_for_role(role)
-    settings = _fetch_settings(schema, ["kill_switch", "last_error"])
-    hb = _role_heartbeat_snapshot(schema, role, window_sec=HEALTH_EVENT_WINDOW_SEC)
-
-    legacy: Dict[str, Any] | None = None
-    if hb.get("last_heartbeat") is None:
-        try:
-            headers = {"X-API-Key": DASHBOARD_API_KEY} if DASHBOARD_API_KEY else {}
-            legacy_raw = await _fetch_json(f"{ROLE_URLS[role].rstrip('/')}/api/system_health", headers=headers)
-            if isinstance(legacy_raw, dict):
-                legacy = legacy_raw
-        except Exception:
-            legacy = None
-    if legacy and hb.get("last_heartbeat") is None:
-        hb["last_heartbeat"] = legacy.get("last_heartbeat")
-        hb["last_seen_seconds"] = legacy.get("last_seen_seconds")
-        hb["online"] = bool(legacy.get("online"))
-        hb["heartbeat_source"] = "legacy_dashboard"
-
-    out = {
-        "ok": True,
-        "role": role,
-        "schema": schema,
-        "online": bool(hb.get("online")),
-        "last_heartbeat": hb.get("last_heartbeat"),
-        "last_seen_seconds": hb.get("last_seen_seconds"),
-        "kill_switch": settings.get("kill_switch"),
-        "last_error": settings.get("last_error"),
-        "heartbeat_source": hb.get("heartbeat_source"),
-        "heartbeat_component": hb.get("heartbeat_component"),
-        "heartbeat_event_type": hb.get("heartbeat_event_type"),
-    }
-    if legacy is not None:
-        out["legacy_system_health"] = legacy
-    return out
+    return mina_pg.build_system_health(schema, role)
 
 @app.get("/api/unified/{role}/stats")
 async def api_unified_role_stats(role: Role):
     schema = _schema_for_role(role)
-    summary = _portfolio_summary_for_schema(schema, None, None)
-    open_positions = 0
-    if _table_exists(schema, "trades"):
-        with psycopg.connect(AUDIT_DSN, autocommit=True, row_factory=dict_row) as conn:
-            with conn.cursor() as cur:
-                cur.execute(f"SELECT COUNT(*) AS n FROM {schema}.trades WHERE UPPER(COALESCE(status,''))='OPEN'")
-                open_positions = int((cur.fetchone() or {}).get("n") or 0)
+    stats = mina_pg.get_stats(schema)
+    trades = int(stats.get("trades") or stats.get("total_trades") or 0)
     return {
         "ok": True,
         "role": role,
         "schema": schema,
-        "pnl": round(float(summary.get("realized_pnl") or 0.0), 6),
-        "win_rate": round((int(summary.get("wins") or 0) / max(1, int(summary.get("trades") or 0))) * 100.0, 2) if int(summary.get("trades") or 0) > 0 else 0.0,
-        "open_positions": open_positions,
-        "total_trades": int(summary.get("trades") or 0),
+        "pnl": float(stats.get("pnl") or 0.0),
+        "win_rate": float(stats.get("win_rate") or 0.0),
+        "open_positions": int(stats.get("open_positions") or 0),
+        "trades": trades,
+        "total_trades": trades,
+        "wins": int(stats.get("wins") or 0),
     }
 
 @app.get("/api/unified/{role}/positions")
 async def api_unified_role_positions(role: Role):
-    return await api_ops_positions(role=role, limit=200)
+    schema = _schema_for_role(role)
+    return mina_pg.list_open_positions(schema, limit=200)
 
 @app.get("/api/unified/{role}/trades")
 async def api_unified_role_trades(role: Role, limit: int = 50, status: str | None = None, symbol: str | None = None):
@@ -3604,7 +4337,7 @@ async def api_unified_role_signals(
     schema = _schema_for_role(role)
     from_ms = _parse_ts_ms(from_ts or date_from)
     to_ms = _parse_ts_ms(to_ts or date_to)
-    rows = _fetch_signal_rows(
+    rows = mina_pg.list_signals(
         schema,
         status=status,
         source=source,
@@ -3640,36 +4373,25 @@ async def api_unified_signal_detail(role: Role, signal_id: int):
         raise HTTPException(status_code=404, detail="signal_not_found")
     return {"ok": True, "role": role, "schema": schema, "item": row}
 @app.get("/api/unified/{role}/signals/{signal_id}/decision")
-async def unified_signal_decision(role: str, signal_id: int):
-    """Best-effort decision precheck for a Mina signal (fetches recent signals and matches by id)."""
-    trace_id = new_trace_id()
-
-    signals = await _dashboard_get_json(role, "/api/signals", params={"limit": 200})
-    sig = None
-    if isinstance(signals, list):
-        for s in signals:
-            try:
-                if int(s.get("id")) == int(signal_id):
-                    sig = s
-                    break
-            except Exception:
-                continue
-
+async def unified_signal_decision(role: Role, signal_id: int, request: Request):
+    """Best-effort decision precheck for a Mina signal, sourced from Postgres."""
+    schema = _schema_for_role(role)
+    sig = mina_pg.get_signal(schema, int(signal_id))
     if not sig:
         raise HTTPException(status_code=404, detail=f"Signal not found: {signal_id}")
 
-    symbol = sig.get("symbol")
+    payload = sig.get("payload") if isinstance(sig.get("payload"), dict) else {}
+    symbol = str(payload.get("symbol") or sig.get("symbol") or "").strip().upper()
     if not symbol:
         raise HTTPException(status_code=400, detail="Signal has no symbol")
 
     decision = await _brain_get_json("/api/decision", params={"symbol": symbol})
-
+    trace_id = _trace_id_from_request(request)
     audit_id = None
     if AUDIT_ENABLED:
-        # Audit failures should never break the API.
         try:
             audit_id = await _audit_write(
-                actor="ui",
+                request=request,
                 action="SIGNAL_DECISION_CHECK",
                 role=role,
                 target_id=str(signal_id),
@@ -3684,6 +4406,7 @@ async def unified_signal_decision(role: str, signal_id: int):
     return {
         "ok": True,
         "role": role,
+        "schema": schema,
         "signal": sig,
         "decision": decision,
         "trace_id": trace_id,
@@ -3694,13 +4417,8 @@ async def unified_signal_decision(role: str, signal_id: int):
 
 @app.post("/api/unified/{role}/signals/publish")
 async def api_unified_signal_publish(role: Role, request: Request):
-    """Publish (stage) a signal into Mina dashboard inbox for the selected role.
-    Proxies to Mina dashboard /publish. Does NOT approve or execute.
-    """
-    base = ROLE_URLS.get(role)
-    if not base:
-        raise HTTPException(status_code=404, detail="Unknown role")
-
+    """Publish (stage) a signal into {schema}.signal_inbox for the selected role."""
+    schema = _schema_for_role(role)
     try:
         body = await request.json()
         if not isinstance(body, dict):
@@ -3708,26 +4426,31 @@ async def api_unified_signal_publish(role: Role, request: Request):
     except Exception:
         body = {}
 
-    headers: Dict[str, str] = {}
-    token = request.headers.get("x-dashboard-token") or request.headers.get("X-Dashboard-Token")
-    if token:
-        headers["x-dashboard-token"] = token
-
-    return await _audited_post_json(
+    signal_id = int(mina_pg.publish_signal(schema, body) or 0)
+    result = {"status": "published", "id": signal_id, "_dashboard_inbox_id": signal_id}
+    await _audit_write(
         request=request,
         action="SIGNAL_PUBLISH",
         role=role,
-        target_id=str(body.get("symbol") or body.get("pair") or ""),
-        url=f"{base}/publish",
-        headers=headers if headers else None,
-        json_body=body,
+        target_id=str(signal_id or body.get("symbol") or body.get("pair") or ""),
+        trace_id=_trace_id_from_request(request),
+        request_json=body,
+        response_json=result,
+        ok=True,
     )
+    return result
+
+
+@app.post("/api/unified/{role}/publish")
+async def api_unified_publish_alias(role: Role, request: Request):
+    """Backward-compatible alias for /api/unified/{role}/signals/publish."""
+    return await api_unified_signal_publish(role, request)
 
 
 @app.get("/api/unified/{role}/logs")
 async def api_unified_role_logs(role: Role, limit: int = 200):
     schema = _schema_for_role(role)
-    rows = _fetch_logs(schema, limit=int(limit))
+    rows = mina_pg.list_logs(schema, limit=int(limit))
     return {"ok": True, "role": role, "schema": schema, "items": rows, "count": len(rows)}
 
 
@@ -4009,6 +4732,7 @@ async def unified_suggest_signal_from_decision(role: Role, request: Request):
     if decision_label in ("DO_NOT_TRADE", "NO_TRADE", "ABSTAIN"):
         # Nothing to stage
         await _audit_write(
+            request=request,
             action="BRAIN_SUGGEST_SIGNAL",
             role=str(role),
             target_id=symbol,
@@ -4043,15 +4767,22 @@ async def unified_suggest_signal_from_decision(role: Role, request: Request):
         },
     }
 
-    headers = {"X-API-Key": DASHBOARD_API_KEY} if DASHBOARD_API_KEY else None
-    upstream = await _audited_post_json(
+    schema = _schema_for_role(role)
+    signal_id = int(mina_pg.publish_signal(schema, publish_payload) or 0)
+    upstream = {
+        "status": "published",
+        "id": signal_id,
+        "_dashboard_inbox_id": signal_id,
+    }
+    await _audit_write(
         request=request,
         action="BRAIN_SUGGEST_SIGNAL",
         role=str(role),
-        target_id=symbol,
-        url=_dash_url(str(role), "/publish"),
-        json_body=publish_payload,
-        headers=headers,
+        target_id=str(signal_id or symbol),
+        trace_id=_trace_id_from_request(request),
+        request_json=publish_payload,
+        response_json={**upstream, "decision": decision},
+        ok=True,
     )
 
     # include the decision for the UI
@@ -4778,6 +5509,254 @@ async def api_live_rollout_set(request: Request):
         pass
 
     return await api_live_rollout_get()
+
+
+def _strategies_payload(role: str = "all") -> Dict[str, Any]:
+    roles = _resolve_roles(role)
+    registry = _strategy_registry_rows()
+    configs = _strategy_config_rows(role if role not in {"all", "*"} else None)
+    cfg_map: Dict[str, Dict[str, Any]] = {r: {} for r in roles}
+    for row in configs:
+        rr = str(row.get("role") or "").strip().lower()
+        sid = str(row.get("strategy_id") or "").strip().upper()
+        if rr in cfg_map and sid:
+            cfg_map[rr][sid] = row
+    runtime_rows = _role_runtime_rows(role if role not in {"all", "*"} else None)
+    runtime_map = {str(x.get("role") or ""): x for x in runtime_rows}
+    profile_map = {str(x.get("profile_id") or ""): x for x in _risk_profile_rows()}
+    role_metrics = {r: _role_trade_runtime_metrics(r) for r in roles}
+    return {
+        "ok": True,
+        "role": role,
+        "roles": roles,
+        "registry": registry,
+        "configs": cfg_map,
+        "runtime": runtime_map,
+        "risk_profiles": profile_map,
+        "metrics": role_metrics,
+    }
+
+
+@app.get("/api/strategies")
+async def api_strategies_get(role: str = "all"):
+    return _strategies_payload(role=role)
+
+
+@app.post("/api/strategies")
+async def api_strategies_update(request: Request):
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Body must be an object")
+    _ensure_strategy_risk_tables()
+    actor = _actor_from_request(request)
+    trace_id = _trace_id_from_request(request)
+    rows_in = body.get("items") if isinstance(body.get("items"), list) else [body]
+    updated: list[dict[str, Any]] = []
+    with psycopg.connect(AUDIT_DSN, autocommit=True, row_factory=dict_row) as conn:
+        with conn.cursor() as cur:
+            for raw in rows_in:
+                if not isinstance(raw, dict):
+                    continue
+                strategy_id = str(raw.get("strategy_id") or "").strip().upper()
+                role = str(raw.get("role") or "").strip().lower()
+                if not strategy_id:
+                    raise HTTPException(status_code=400, detail="strategy_id is required")
+                role = _validate_role(role)
+                if role == "live":
+                    _enforce_live_write_confirmation(role="live", action="STRATEGY_CONFIG_SET", body=raw, request=request)
+                enabled = bool(raw.get("enabled", True))
+                params_json = raw.get("params_json") if isinstance(raw.get("params_json"), dict) else {}
+                min_conf = _as_optional_float(raw.get("min_confidence"))
+                min_score = _as_optional_float(raw.get("min_score"))
+                max_positions = raw.get("max_positions")
+                cooldown_sec = raw.get("cooldown_sec")
+                cur.execute(
+                    """
+                    INSERT INTO brain.strategy_config
+                    (strategy_id, role, enabled, params_json, min_confidence, min_score, max_positions, cooldown_sec, updated_at)
+                    VALUES (%s, %s, %s, %s::jsonb, %s, %s, %s, %s, now())
+                    ON CONFLICT (strategy_id, role) DO UPDATE
+                    SET enabled = EXCLUDED.enabled,
+                        params_json = EXCLUDED.params_json,
+                        min_confidence = EXCLUDED.min_confidence,
+                        min_score = EXCLUDED.min_score,
+                        max_positions = EXCLUDED.max_positions,
+                        cooldown_sec = EXCLUDED.cooldown_sec,
+                        updated_at = now()
+                    RETURNING *
+                    """,
+                    (
+                        strategy_id,
+                        role,
+                        enabled,
+                        json.dumps(params_json, ensure_ascii=True),
+                        min_conf,
+                        min_score,
+                        (None if max_positions in (None, "") else int(max_positions)),
+                        (None if cooldown_sec in (None, "") else int(cooldown_sec)),
+                    ),
+                )
+                row = dict(cur.fetchone() or {})
+                row["params_json"] = row.get("params_json") if isinstance(row.get("params_json"), dict) else {}
+                row["enabled"] = bool(row.get("enabled"))
+                updated.append(row)
+    await _audit_write(
+        request=request,
+        action="STRATEGY_CONFIG_SET",
+        role=None,
+        target_id="brain.strategy_config",
+        trace_id=trace_id,
+        request_json={"items": rows_in, "actor": actor},
+        response_json={"updated": len(updated)},
+        ok=True,
+    )
+    return {"ok": True, "trace_id": trace_id, "updated": updated, "count": len(updated)}
+
+
+@app.get("/api/risk/profiles")
+async def api_risk_profiles_get():
+    items = _risk_profile_rows()
+    return {"ok": True, "items": items, "count": len(items)}
+
+
+@app.post("/api/risk/profiles")
+async def api_risk_profiles_post(request: Request):
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Body must be an object")
+    _ensure_strategy_risk_tables()
+    trace_id = _trace_id_from_request(request)
+    actor = _actor_from_request(request)
+    items = body.get("items") if isinstance(body.get("items"), list) else [body]
+    updated: list[dict[str, Any]] = []
+    with psycopg.connect(AUDIT_DSN, autocommit=True, row_factory=dict_row) as conn:
+        with conn.cursor() as cur:
+            for raw in items:
+                if not isinstance(raw, dict):
+                    continue
+                profile_id = str(raw.get("profile_id") or "").strip()
+                name = str(raw.get("name") or profile_id).strip()
+                params_json = raw.get("params_json") if isinstance(raw.get("params_json"), dict) else {}
+                if not profile_id:
+                    raise HTTPException(status_code=400, detail="profile_id is required")
+                cur.execute(
+                    """
+                    INSERT INTO brain.risk_profile (profile_id, name, params_json, updated_at)
+                    VALUES (%s, %s, %s::jsonb, now())
+                    ON CONFLICT (profile_id) DO UPDATE
+                    SET name = EXCLUDED.name,
+                        params_json = EXCLUDED.params_json,
+                        updated_at = now()
+                    RETURNING *
+                    """,
+                    (
+                        profile_id,
+                        name,
+                        json.dumps(params_json, ensure_ascii=True),
+                    ),
+                )
+                row = dict(cur.fetchone() or {})
+                row["params_json"] = row.get("params_json") if isinstance(row.get("params_json"), dict) else {}
+                updated.append(row)
+    await _audit_write(
+        request=request,
+        action="RISK_PROFILE_SET",
+        role=None,
+        target_id="brain.risk_profile",
+        trace_id=trace_id,
+        request_json={"items": items, "actor": actor},
+        response_json={"updated": len(updated)},
+        ok=True,
+    )
+    return {"ok": True, "trace_id": trace_id, "updated": updated, "count": len(updated)}
+
+
+@app.get("/api/runtime/role")
+async def api_runtime_role_get(role: str = "all"):
+    roles = _resolve_roles(role)
+    runtime_rows = {r: _role_runtime_get(r) for r in roles}
+    profile_rows = {r: _risk_profile_by_id(runtime_rows[r].get("active_risk_profile")) for r in roles}
+    metrics = {r: _role_trade_runtime_metrics(r) for r in roles}
+    return {
+        "ok": True,
+        "role": role,
+        "items": runtime_rows,
+        "profiles": profile_rows,
+        "metrics": metrics,
+    }
+
+
+@app.post("/api/runtime/role")
+async def api_runtime_role_post(request: Request):
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Body must be an object")
+    _ensure_strategy_risk_tables()
+    role = _validate_role(str(body.get("role") or "").strip().lower())
+    if role == "live":
+        _enforce_live_write_confirmation(role="live", action="RUNTIME_ROLE_SET", body=body, request=request)
+    active_profile = str(body.get("active_risk_profile") or "").strip()
+    if active_profile:
+        profile_exists = any(str(x.get("profile_id") or "") == active_profile for x in _risk_profile_rows())
+        if not profile_exists:
+            raise HTTPException(status_code=400, detail="active_risk_profile not found")
+    mode = str(body.get("execution_mode") or "").strip().upper() or _role_runtime_get(role).get("execution_mode") or "PAPER"
+    if mode not in RUNTIME_EXECUTION_MODES:
+        raise HTTPException(status_code=400, detail=f"execution_mode must be one of {', '.join(RUNTIME_EXECUTION_MODES)}")
+    allow_auto = bool(body.get("allow_auto_approve", _role_runtime_get(role).get("allow_auto_approve", False)))
+    allow_manual = bool(body.get("allow_manual_execute", _role_runtime_get(role).get("allow_manual_execute", True)))
+    trace_id = _trace_id_from_request(request)
+    actor = _actor_from_request(request)
+    with psycopg.connect(AUDIT_DSN, autocommit=True, row_factory=dict_row) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO brain.role_runtime
+                (role, active_risk_profile, execution_mode, allow_auto_approve, allow_manual_execute, updated_at)
+                VALUES (%s, %s, %s, %s, %s, now())
+                ON CONFLICT (role) DO UPDATE
+                SET active_risk_profile = COALESCE(EXCLUDED.active_risk_profile, brain.role_runtime.active_risk_profile),
+                    execution_mode = EXCLUDED.execution_mode,
+                    allow_auto_approve = EXCLUDED.allow_auto_approve,
+                    allow_manual_execute = EXCLUDED.allow_manual_execute,
+                    updated_at = now()
+                RETURNING *
+                """,
+                (
+                    role,
+                    active_profile or None,
+                    mode,
+                    allow_auto,
+                    allow_manual,
+                ),
+            )
+            row = dict(cur.fetchone() or {})
+    await _audit_write(
+        request=request,
+        action="RUNTIME_ROLE_SET",
+        role=role,
+        target_id=role,
+        trace_id=trace_id,
+        request_json={"role": role, "active_risk_profile": active_profile, "execution_mode": mode, "allow_auto_approve": allow_auto, "allow_manual_execute": allow_manual, "actor": actor},
+        response_json={"ok": True},
+        ok=True,
+    )
+    return {
+        "ok": True,
+        "trace_id": trace_id,
+        "item": row,
+        "profile": _risk_profile_by_id(row.get("active_risk_profile")),
+        "metrics": _role_trade_runtime_metrics(role),
+    }
 
 
 @app.post("/api/integrations/binance/test")
@@ -5855,6 +6834,56 @@ async def api_doctor_checks(run_tests: bool = True):
     except Exception as e:
         _push("brain_sync_lag", "WARN", str(e))
 
+    # Pre-live checks: strategy/risk/runtime safety.
+    try:
+        _ensure_strategy_risk_tables()
+        runtimes = {str(r.get("role") or ""): r for r in _role_runtime_rows()}
+        strategy_cfg_paper = _strategy_config_map("paper")
+        enabled_paper = [sid for sid, row in strategy_cfg_paper.items() if bool(row.get("enabled"))]
+        for role in ("paper", "live", "pump"):
+            rr = runtimes.get(role) or _role_runtime_get(role)
+            profile_id = str((rr or {}).get("active_risk_profile") or "")
+            if profile_id:
+                _push(f"risk_profile_attached_{role}", "OK", f"profile={profile_id}")
+            else:
+                _push(f"risk_profile_attached_{role}", "CRIT", "no active_risk_profile attached")
+            exec_mode = str((rr or {}).get("execution_mode") or "").upper()
+            sev = "OK" if exec_mode in RUNTIME_EXECUTION_MODES else "CRIT"
+            _push(
+                f"execution_mode_{role}",
+                sev,
+                f"execution_mode={exec_mode} (expected one of {', '.join(RUNTIME_EXECUTION_MODES)})",
+            )
+        if enabled_paper:
+            _push("strategy_enabled_paper", "OK", f"enabled={len(enabled_paper)}", enabled_paper)
+        else:
+            _push("strategy_enabled_paper", "CRIT", "no enabled strategies for paper role")
+
+        traces_recent = 0
+        schema = _schema_for_role("paper")
+        if _table_exists(schema, "decision_traces"):
+            with psycopg.connect(AUDIT_DSN, autocommit=True, row_factory=dict_row) as conn:
+                with conn.cursor() as cur:
+                    cur.execute(f"SELECT COUNT(*) AS n FROM {schema}.decision_traces WHERE created_at_ms >= %s", (_ms_now() - 30 * 60 * 1000,))
+                    traces_recent = int((cur.fetchone() or {}).get("n") or 0)
+        _push(
+            "decision_traces_flowing",
+            "OK" if traces_recent > 0 else "WARN",
+            f"recent_30m={traces_recent}",
+        )
+    except Exception as e:
+        _push("strategy_risk_runtime", "WARN", str(e))
+
+    # Test/PAPER safe posture check.
+    try:
+        secret = _load_integration_secret("binance")
+        if not secret:
+            _push("keys_absent_test_mode", "OK", "Binance keys absent (expected for TEST/PAPER phase).")
+        else:
+            _push("keys_absent_test_mode", "WARN", "Binance keys are configured; verify live execution remains disabled.")
+    except Exception as e:
+        _push("keys_absent_test_mode", "WARN", str(e))
+
     if run_tests:
         # Write path test: insert diagnostic command and verify persistence.
         try:
@@ -6180,6 +7209,7 @@ async def api_index():
         "doctor": ["/api/doctor/run", "/api/doctor/checks", "/api/doctor/incidents", "/api/doctor/fix/clear_restart", "/api/doctor/fix/clear_commands"],
         "learn": ["/api/learn/status", "/api/learn/sync", "/api/learn/train", "/api/learn/promote", "/api/learn/rollback", "/api/learn/kpis", "/api/learn/backtest", "/api/learn/config"],
         "live_safety": ["/api/live/safety_policy", "/api/live/rollout"],
+        "strategy_risk": ["/api/strategies", "/api/risk/profiles", "/api/runtime/role"],
         "manual_ops": ["/api/manual/execute", "/api/snapshot"],
         "pump": ["/api/pump/candidates/promote"],
         "alerts": ["/api/alerts/telegram/settings", "/api/alerts/telegram/test", "/api/alerts/rules", "/api/alerts/history"],
@@ -6278,6 +7308,30 @@ def _default_api_docs_registry() -> Dict[str, Any]:
                 "route": "/api/live/rollout",
                 "description": "Set rollout stage LIVE-0/LIVE-1/LIVE-2.",
                 "sample_curl": "curl -s -X POST http://localhost:8200/api/live/rollout -H 'Content-Type: application/json' -d '{\"stage\":\"LIVE-1\"}'",
+            },
+            {
+                "method": "GET",
+                "route": "/api/strategies",
+                "description": "Strategy registry + role configs + runtime/risk context.",
+                "sample_curl": "curl -s 'http://localhost:8200/api/strategies?role=paper'",
+            },
+            {
+                "method": "POST",
+                "route": "/api/strategies",
+                "description": "Update DB-backed strategy config for a role.",
+                "sample_curl": "curl -s -X POST http://localhost:8200/api/strategies -H 'Content-Type: application/json' -d '{\"strategy_id\":\"BASELINE_SCALP\",\"role\":\"paper\",\"enabled\":true}'",
+            },
+            {
+                "method": "GET",
+                "route": "/api/risk/profiles",
+                "description": "Risk profile list and parameters stored in Postgres.",
+                "sample_curl": "curl -s http://localhost:8200/api/risk/profiles",
+            },
+            {
+                "method": "GET",
+                "route": "/api/runtime/role",
+                "description": "Role runtime execution mode + active risk profile + live metrics.",
+                "sample_curl": "curl -s 'http://localhost:8200/api/runtime/role?role=paper'",
             },
             {
                 "method": "GET",
@@ -7696,6 +8750,37 @@ async def api_manual_execute(request: Request):
     if "leverage" in body:
         params["leverage"] = _as_float(body.get("leverage"), 0.0)
 
+    eval_signal = {
+        "symbol": symbol,
+        "side": direction,
+        "strategy": "MANUAL_EXECUTE",
+        "confidence": 1.0,
+        "score": 1.0,
+        "amount_usd": amount_usd,
+        "market": market,
+        "leverage": _as_float(body.get("leverage"), 0.0),
+    }
+    eval_out = _strategy_risk_eval(role, eval_signal, action="MANUAL_EXECUTE")
+    if not bool(eval_out.get("ok")):
+        decision_trace_id = _insert_decision_trace(
+            role,
+            eval_signal,
+            eval_out,
+            trace_id=trace_id,
+            gate="BLOCK",
+            decision="NO_TRADE",
+        )
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "strategy_risk_veto",
+                "message": "Manual execute blocked by strategy/risk policy.",
+                "trace_id": trace_id,
+                "decision_trace_id": decision_trace_id,
+                "evaluation": jsonable_encoder(eval_out),
+            },
+        )
+
     queued = _queue_role_command(
         role=role,
         cmd="MANUAL_EXECUTE",
@@ -7728,6 +8813,14 @@ async def api_manual_execute(request: Request):
     simulated = role == "paper"
     trade_id = 0
     lifecycle = "queued"
+    decision_trace_id = _insert_decision_trace(
+        role,
+        eval_signal,
+        eval_out,
+        trace_id=trace_id,
+        gate="PASS",
+        decision="MANUAL_EXECUTE",
+    )
     if simulated:
         trade_id = _manual_trade_insert(schema, params, trace_id, simulated=True)
         _command_lifecycle_mark(schema, command_id, ack=True, executed=True, note="simulated_by_gateway")
@@ -7759,6 +8852,8 @@ async def api_manual_execute(request: Request):
         "simulated": simulated,
         "exchange_skipped": simulated,
         "lifecycle": lifecycle,
+        "decision_trace_id": decision_trace_id,
+        "evaluation": eval_out,
         "queue": queued.get("queue") or {},
     }
 
@@ -8345,6 +9440,16 @@ async def api_pump_candidate_promote(request: Request):
     return out
 
 
+@app.get("/api/pump/candidates/promote")
+async def api_pump_candidate_promote_docs():
+    return {
+        "ok": True,
+        "method": "POST",
+        "route": "/api/pump/candidates/promote",
+        "detail": "Use POST with {id, target_role, side, note} to promote a pump candidate.",
+    }
+
+
 @app.get("/api/pump/status")
 async def api_pump_status():
     snap = _pump_status_snapshot()
@@ -8352,7 +9457,7 @@ async def api_pump_status():
 
 
 @app.get("/api/pump/candidates")
-async def api_pump_candidates(limit: int = 50, status: str = "PENDING"):
+async def api_pump_candidates(limit: int = 50, status: str = "ALL"):
     rows = _list_pump_candidates(limit=limit, status=status)
     return {"ok": True, "status": "ok", "items": rows, "count": len(rows)}
 
@@ -8397,23 +9502,37 @@ async def api_pump_trades(limit: int = 50, status: str | None = None):
 @app.get("/api/mina/{role}/{path:path}")
 async def mina_proxy(role: Role, path: str, request: Request):
     """
-    Proxy Mina dashboard /api/* endpoints via Gateway using X-API-Key.
-    Example:
-      /api/mina/paper/signals?limit=10  ->  http://mina_dashboard_paper:8000/api/signals?limit=10
-    """
-    base = ROLE_URLS.get(role)
-    if not base:
-        raise HTTPException(status_code=404, detail="Unknown role")
+    Legacy Mina route bridge.
 
+    Dashboards were removed from runtime; key routes are mapped to DB-backed
+    unified endpoints. Unknown routes return HTTP 410 with migration guidance.
+    Example:
+      /api/mina/paper/api/signals?limit=10  ->  /api/unified/paper/signals
+    """
+    _validate_role(role)
     schema = _schema_for_role(role)
-    path_l = str(path or "").strip().strip("/").lower()
+    raw_path = str(path or "").strip().strip("/")
+    path_l = raw_path.lower()
+    if path_l.startswith("api/"):
+        path_l = path_l[4:]
     params = dict(request.query_params)
 
-    # DB-backed fallbacks first (keeps reads alive when Mina dashboards are down).
+    # Explicit mappings from legacy Mina routes to DB-backed unified read models.
+    if path_l in ("system_health", "health"):
+        return mina_pg.build_system_health(schema, role)
+    if path_l == "snapshot":
+        return mina_pg.snapshot(role, signal_limit=int(params.get("limit") or 10), position_limit=int(params.get("limit_positions") or 200))
+    if path_l == "stats":
+        return mina_pg.get_stats(schema)
+    if path_l == "db_ready":
+        return {"status": "ok", "backend": "postgres", "pg_schema": schema}
+    if path_l == "roles":
+        return {"roles": ["paper", "live", "pump"]}
+
     if path_l == "signals":
         limit = int(params.get("limit") or 50)
         status = params.get("status")
-        rows = _fetch_signal_rows(
+        rows = mina_pg.list_signals(
             schema,
             status=str(status) if status else None,
             source=str(params.get("source") or "").strip() or None,
@@ -8424,7 +9543,8 @@ async def mina_proxy(role: Role, path: str, request: Request):
             to_ms=_parse_ts_ms(str(params.get("to_ts") or params.get("date_to") or "")),
             limit=limit,
         )
-        return {"ok": True, "items": rows, "count": len(rows)}
+        # Keep legacy dashboard response shape (plain array).
+        return rows
     if role == "pump" and path_l == "pump/status":
         return _pump_status_snapshot()
     if role == "pump" and path_l == "pump/candidates":
@@ -8446,6 +9566,12 @@ async def mina_proxy(role: Role, path: str, request: Request):
     if role == "pump" and path_l == "trades":
         rows = await _trades_fetch(role="pump", limit=int(params.get("limit") or 50), status=params.get("status"))
         return {"status": "ok", "items": rows}
+    if path_l.startswith("signals/") and path_l.endswith("/decision"):
+        try:
+            sid = int(path_l.split("/", 2)[1])
+        except Exception:
+            raise HTTPException(status_code=400, detail="invalid_signal_id")
+        return await unified_signal_decision(role=role, signal_id=sid, request=request)
     if path_l.startswith("signals/"):
         try:
             sid = int(path_l.split("/", 1)[1])
@@ -8456,15 +9582,15 @@ async def mina_proxy(role: Role, path: str, request: Request):
             raise HTTPException(status_code=404, detail="signal_not_found")
         return row
     if path_l == "positions":
-        out = await api_ops_positions(role=role, limit=int(params.get("limit") or 200))
-        return out.get("items") or []
+        return mina_pg.list_open_positions(schema, limit=int(params.get("limit") or 200))
     if path_l == "logs":
-        rows = _fetch_logs(schema, limit=int(params.get("limit") or 200))
-        return rows
+        return mina_pg.list_logs(schema, limit=int(params.get("limit") or 200))
     if path_l == "settings":
-        return _fetch_all_settings(schema)
-    if path_l == "commands":
+        return mina_pg.fetch_settings(schema)
+    if path_l in ("commands", "commands/history"):
         out = await api_unified_commands_history(role=role, limit=int(params.get("limit") or 50))
+        if path_l == "commands":
+            return out.get("items") or []
         return out
     if path_l == "meta/datasource":
         db_name, host = _dsn_info(AUDIT_DSN)
@@ -8478,25 +9604,40 @@ async def mina_proxy(role: Role, path: str, request: Request):
             "version": "gateway-proxy",
         }
 
-    # Best-effort upstream proxy (backward compatibility).
-    upstream = f"{base}/api/{path}".rstrip("/")
-    headers = {"X-API-Key": DASHBOARD_API_KEY}
-    try:
-        return await _fetch_json(upstream, headers=headers, params=params)
-    except HTTPException as e:
-        return {"ok": False, "error": _http_exc_detail(e), "upstream": upstream}
+    use_endpoint = f"/api/unified/{role}/snapshot"
+    if "signal" in path_l:
+        use_endpoint = f"/api/unified/{role}/signals"
+    elif "position" in path_l:
+        use_endpoint = f"/api/unified/{role}/positions"
+    elif "log" in path_l:
+        use_endpoint = f"/api/unified/{role}/logs"
+    elif "command" in path_l:
+        use_endpoint = f"/api/unified/{role}/commands"
+    elif "health" in path_l:
+        use_endpoint = f"/api/unified/{role}/system_health"
+    return JSONResponse(
+        status_code=410,
+        content={
+            "status": "gone",
+            "error": "legacy_dashboards_removed",
+            "message": "Legacy Mina dashboard services were removed from the runtime stack.",
+            "legacy_route": f"/api/mina/{role}/{raw_path}",
+            "use_endpoint": use_endpoint,
+        },
+    )
 
 
 @app.post("/api/mina/{role}/{path:path}")
 async def mina_proxy_post(role: Role, path: str, request: Request):
     """
-    Proxy Mina dashboard /api/* POST endpoints via Gateway using X-API-Key.
+    Legacy Mina write-route bridge.
+
+    Dashboards were removed from runtime; key writes are mapped to DB-backed
+    unified routes. Unknown routes return HTTP 410 with migration guidance.
     Example:
-      /api/mina/pump/pump/candidates/reject -> http://mina_dashboard_pump:8002/api/pump/candidates/reject
+      /api/mina/paper/api/commands/queue -> /api/unified/paper/commands
     """
-    base = ROLE_URLS.get(role)
-    if not base:
-        raise HTTPException(status_code=404, detail="Unknown role")
+    _validate_role(role)
 
     try:
         body = await request.json()
@@ -8506,7 +9647,10 @@ async def mina_proxy_post(role: Role, path: str, request: Request):
         body = {}
 
     schema = _schema_for_role(role)
-    path_l = str(path or "").strip().strip("/").lower()
+    raw_path = str(path or "").strip().strip("/")
+    path_l = raw_path.lower()
+    if path_l.startswith("api/"):
+        path_l = path_l[4:]
     trace_id = _trace_id_from_request(request)
     if role == "live":
         _enforce_live_write_confirmation(role="live", action=f"MINA_PROXY_POST:{path_l}", body=body, request=request)
@@ -8622,6 +9766,10 @@ async def mina_proxy_post(role: Role, path: str, request: Request):
         )
         return {"ok": True, "status": "ok", "trace_id": trace_id, "id": int(label_id or 0)}
 
+    if path_l in ("publish", "signals/publish"):
+        signal_id = int(mina_pg.publish_signal(schema, body) or 0)
+        return {"status": "published", "id": signal_id, "_dashboard_inbox_id": signal_id}
+
     # DB-native write paths (dashboard-independent).
     if path_l in ("commands/queue", "command"):
         cmd = str(body.get("cmd") or "").strip().upper()
@@ -8688,13 +9836,23 @@ async def mina_proxy_post(role: Role, path: str, request: Request):
         _set_setting(schema, "kill_switch", "0", source="gateway.proxy.clear_kill_switch")
         return {"ok": True, "status": "ok", "trace_id": trace_id, **queued}
 
-    # Backward-compatible passthrough.
-    upstream = f"{base}/api/{path}".rstrip("/")
-    headers = {"X-API-Key": DASHBOARD_API_KEY}
-    try:
-        return await _post_json(upstream, headers=headers, json_body=body)
-    except HTTPException as e:
-        return {"ok": False, "error": _http_exc_detail(e), "upstream": upstream}
+    use_endpoint = f"/api/unified/{role}/commands"
+    if "signal" in path_l:
+        use_endpoint = f"/api/unified/{role}/signals"
+    elif "publish" in path_l:
+        use_endpoint = f"/api/unified/{role}/publish"
+    elif "setting" in path_l:
+        use_endpoint = f"/api/unified/{role}/settings"
+    return JSONResponse(
+        status_code=410,
+        content={
+            "status": "gone",
+            "error": "legacy_dashboards_removed",
+            "message": "Legacy Mina dashboard services were removed from the runtime stack.",
+            "legacy_route": f"/api/mina/{role}/{raw_path}",
+            "use_endpoint": use_endpoint,
+        },
+    )
 
 
 # ---------------------------
@@ -8715,6 +9873,9 @@ _RESERVED_API_PREFIXES = (
     "api-index",
     "webhooks",
     "learn",
+    "strategies",
+    "risk",
+    "runtime",
     "alerts",
     "integrations",
     "_debug",

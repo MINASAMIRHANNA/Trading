@@ -148,6 +148,30 @@
     },
     {
       "method": "GET",
+      "route": "/api/strategies?role=paper|live|pump|all",
+      "description": "Strategy registry + per-role configs + runtime/risk snapshots.",
+      "sample_curl": "curl -s 'http://localhost:8200/api/strategies?role=paper'"
+    },
+    {
+      "method": "POST",
+      "route": "/api/strategies",
+      "description": "Upsert strategy config for role (enabled/thresholds/limits).",
+      "sample_curl": "curl -s -X POST http://localhost:8200/api/strategies -H 'Content-Type: application/json' -d '{\"strategy_id\":\"BASELINE_SCALP\",\"role\":\"paper\",\"enabled\":true}'"
+    },
+    {
+      "method": "GET",
+      "route": "/api/risk/profiles",
+      "description": "List DB-backed risk profiles.",
+      "sample_curl": "curl -s http://localhost:8200/api/risk/profiles"
+    },
+    {
+      "method": "GET",
+      "route": "/api/runtime/role?role=paper|live|pump|all",
+      "description": "Role runtime settings (execution mode, active profile, auto/manual toggles).",
+      "sample_curl": "curl -s 'http://localhost:8200/api/runtime/role?role=paper'"
+    },
+    {
+      "method": "GET",
       "route": "/api/learn/state",
       "description": "Learning state in brain schema tables.",
       "sample_curl": "curl -s http://localhost:8200/api/learn/state"
