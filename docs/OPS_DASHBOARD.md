@@ -1,66 +1,42 @@
-# Ops Dashboard (Mina-style)
+# Ops Dashboard
 
-Two dashboards are available:
-- Unified React dashboard: `http://localhost:5173` (Vite, Gateway `/api` proxy)
+## Runtime Surfaces
+- Unified React dashboard: `http://localhost:5173` (primary control plane)
 - Gateway server-rendered UI: `http://localhost:8200/ui`
+- Gateway Ops pages:
+  - `http://localhost:8200/ui/ops/observability`
+  - `http://localhost:8200/ui/ops/live-control`
+  - `http://localhost:8200/ui/ops/dead-letters`
+  - `http://localhost:8200/ui/ops/commands`
 
-## Routes
-- `/ui/ops` – Ops Live (positions, logs, status, errors, restart + kill switch)
-- `/ui/portfolio` – KPIs + trades + symbol exposure + exports
-- `/ui/manual` – Publish/approve/reject signals, close trades, risk settings
-- `/ui/reports` – Paper/Arena, Analytics, Deep Audit, extra reports
-- `/ui/doctor` – Doctor checks + fix actions
-- `/ui/api` – API index + webhooks
-- `/ui/learn` – Learning status + triggers
-- `/ui/alerts` – Telegram settings + rules
-- `/ui/go_live` – Ready-for-live checklist
+Legacy `mina_dashboard_*` services are removed from runtime.
 
-## Data Sources
-- Gateway endpoints (`/api/ops/*`, `/api/portfolio/*`, `/api/reports/*`, `/api/doctor/*`, `/api/learn/*`, `/api/alerts/*`)
-- Mina dashboards via gateway proxy (`/api/mina/{role}/*`)
+## Core Data Sources
+- Gateway DB-backed unified endpoints (`/api/unified/*`)
+- Gateway control/audit/ops endpoints (`/api/control/*`, `/api/ops/*`, `/api/audit/*`)
+- Brain API through Gateway proxy (`/api/brain/*`)
 
-## Secrets Configuration
-- Binance keys: `Portfolio` page (`/portfolio`) via Gateway endpoint `/api/integrations/binance/connect`.
-- Telegram token/chat id: `Alerts` page (`/alerts`) via Gateway endpoint `/api/alerts/telegram/settings`.
-- Set `TRADING_MASTER_KEY` in Gateway env for encrypted secret storage.
+## Live Safety Controls
+- Status: `GET /api/control/live/status`
+- Arm: `POST /api/control/live/arm`
+- Confirm: `POST /api/control/live/confirm`
+- Disarm: `POST /api/control/live/disarm`
+- Allowlist: `POST /api/control/live/allowlist`
+- Limits: `POST /api/control/live/limits`
 
-## Unified DB Wiring
-- Verification endpoint: `/api/system/db_wiring`
-- Per-service datasource meta:
-  - Gateway: `/api/meta/datasource`
-  - Brain (via Gateway): `/api/brain/meta/datasource`
-  - Mina per role (via Gateway): `/api/mina/{role}/meta/datasource`
-- Verifies one Postgres DB + expected schemas + service startup registrations.
-- Startup registrations are written by:
-  - `gateway_api`
-  - `brain_api` / `brain_sync_worker`
-  - `mina_dashboard` per role
-  - `mina_bot` / `mina_monitor` per role
-  - `pump_hunter` (pump role)
+Two-step live enable flow:
+1. `ARM` to rotate and receive a short-lived token.
+2. `CONFIRM` with token to set gate state to `CONFIRMED`.
+3. Use `DISARM` to immediately return to safe state.
 
-## Project Mode Toggle
-- In Unified `Portfolio`, use `Project Trading Mode`:
-  - `Switch to TESTNET`
-  - `Switch to LIVE`
-- Routed through Gateway endpoint `/api/project/mode`.
-- Safety policy: `paper` stays `PAPER` mode even when project mode is `LIVE`.
+If Gateway API key auth is enabled, browser API calls must authenticate via:
+- `X-API-Key` header on API requests, or
+- session cookie via `POST /api/auth/login`.
 
-## Notes
-- Uses Mina dashboard styling from `services/mina_bot/dashboard/static/style.css`.
-- UI uses vanilla JS fetch polling (2s by default on Ops Live).
-- Existing React UI on `/` remains unchanged.
-
-## Quick Check
-```
-open http://localhost:8200/ui/ops
-```
-
-## Readiness
-Run:
-```
-bash scripts/smoke_stack.sh
-bash scripts/smoke_e2e_trade.sh
-bash scripts/diag_mesh.sh
-bash scripts/check_unified_db.sh
-bash scripts/smoke_db_singleton.sh
+## Quick Validation
+```bash
+bash scripts/smoke_observability.sh
+bash scripts/smoke_live_safety_gate.sh
+bash scripts/smoke_qa_pack.sh
+bash scripts/smoke_ops_ui_api.sh
 ```
