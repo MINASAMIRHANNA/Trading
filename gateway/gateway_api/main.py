@@ -8,7 +8,6 @@ import time
 import math
 import hmac
 import hashlib
-import secrets
 import csv
 import io
 import datetime as dt
@@ -29,7 +28,8 @@ from fastapi.staticfiles import StaticFiles
 
 from gateway_api.contracts_v1 import json_schema as contracts_v1_schema
 from gateway_api import mina_pg
-from gateway_api import observability as unified_observability
+from gateway_api.control_live import build_router as build_control_live_router
+from gateway_api.observability_routes import build_router as build_observability_router
 
 from gateway_api.audit import ensure_audit_schema_and_table, get_dsn as _audit_get_dsn, insert_audit_event, new_trace_id, fetch_audit_events, fetch_audit_event_by_id
 from gateway_api.crypto import encrypt_json, decrypt_json, hash_secret
@@ -370,22 +370,6 @@ def _validate_role(role: str) -> str:
 def _schema_for_role(role: str) -> str:
     r = _validate_role(role)
     return f"{MINA_SCHEMA_PREFIX}{r}"
-
-def _dash_url(role: str, path: str) -> str:
-    r = _validate_role(role)
-    base = ROLE_URLS[r].rstrip("/")
-    p = "/" + str(path or "").lstrip("/")
-    return f"{base}{p}"
-
-
-async def _dashboard_get_json(role: str, path: str, params: dict | None = None) -> Any:
-    """GET JSON from the Mina dashboard service for the given role."""
-    r = _validate_role(role)
-    url = f"{ROLE_URLS[r]}{path}"
-    headers: dict[str, str] = {}
-    if DASHBOARD_API_KEY:
-        headers["X-API-Key"] = DASHBOARD_API_KEY
-    return await _fetch_json(url, headers=headers, params=params)
 
 async def _brain_get_json(path: str, params: dict | None = None) -> Any:
     """GET JSON from Brain API service."""
@@ -4207,24 +4191,12 @@ async def api_unified_overview():
     return out
 
 
-@app.get("/api/unified/observability")
-async def api_unified_observability(roles: str | None = None):
-    role_list: list[str] = []
-    if roles:
-        for raw in str(roles).split(","):
-            role = str(raw or "").strip().lower()
-            if not role:
-                continue
-            _validate_role(role)
-            if role not in role_list:
-                role_list.append(role)
-    if not role_list:
-        role_list = ["paper", "live", "pump"]
-    return await asyncio.to_thread(
-        unified_observability.build_unified_observability,
-        AUDIT_DSN,
-        role_list,
+app.include_router(
+    build_observability_router(
+        validate_role=_validate_role,
+        dsn=AUDIT_DSN,
     )
+)
 
 
 @app.get("/api/unified/autopilot")
@@ -4519,6 +4491,90 @@ async def api_unified_commands_history(role: Role, limit: int = 50):
             cur.execute(f"SELECT * FROM {schema}.commands ORDER BY id DESC LIMIT %s", (lim,))
             rows = [dict(r) for r in (cur.fetchall() or [])]
     return {"ok": True, "role": role, "schema": schema, "items": rows, "count": len(rows)}
+
+
+@app.get("/api/unified/{role}/commands")
+async def api_unified_commands_list(role: Role, limit: int = 50, status: str | None = None):
+    schema = _schema_for_role(role)
+    if not _table_exists(schema, "commands"):
+        return {
+            "ok": True,
+            "role": role,
+            "schema": schema,
+            "items": [],
+            "count": 0,
+            "filters": {"status": str(status or "").strip().upper() or None},
+        }
+
+    lim = max(1, min(int(limit or 50), 500))
+    status_filter = str(status or "").strip().upper()
+    cols = _table_columns(schema, "commands")
+    where_parts: list[str] = []
+    vals: list[Any] = []
+
+    if status_filter and "status" in cols:
+        where_parts.append("UPPER(COALESCE(status, '')) = %s")
+        vals.append(status_filter)
+
+    query = f"SELECT * FROM {schema}.commands"
+    if where_parts:
+        query += " WHERE " + " AND ".join(where_parts)
+    if "id" in cols:
+        query += " ORDER BY id DESC"
+    elif "created_at_ms" in cols:
+        query += " ORDER BY created_at_ms DESC"
+    elif "created_at" in cols:
+        query += " ORDER BY created_at DESC"
+    query += " LIMIT %s"
+    vals.append(lim)
+
+    with psycopg.connect(AUDIT_DSN, autocommit=True, row_factory=dict_row) as conn:
+        with conn.cursor() as cur:
+            cur.execute(query, tuple(vals))
+            rows = [dict(r) for r in (cur.fetchall() or [])]
+
+    return {
+        "ok": True,
+        "role": role,
+        "schema": schema,
+        "items": rows,
+        "count": len(rows),
+        "filters": {"status": status_filter or None},
+    }
+
+
+@app.get("/api/unified/dead_letters")
+async def api_unified_dead_letters(role: Role = "paper", limit: int = 50):
+    schema = _schema_for_role(role)
+    if not _table_exists(schema, "command_dead_letters"):
+        return {
+            "ok": True,
+            "role": role,
+            "schema": schema,
+            "items": [],
+            "count": 0,
+        }
+
+    lim = max(1, min(int(limit or 50), 500))
+    cols = _table_columns(schema, "command_dead_letters")
+    query = f"SELECT * FROM {schema}.command_dead_letters"
+    if "id" in cols:
+        query += " ORDER BY id DESC"
+    elif "inserted_at_ms" in cols:
+        query += " ORDER BY inserted_at_ms DESC"
+    query += " LIMIT %s"
+
+    with psycopg.connect(AUDIT_DSN, autocommit=True, row_factory=dict_row) as conn:
+        with conn.cursor() as cur:
+            cur.execute(query, (lim,))
+            rows = [dict(r) for r in (cur.fetchall() or [])]
+    return {
+        "ok": True,
+        "role": role,
+        "schema": schema,
+        "items": rows,
+        "count": len(rows),
+    }
 
 @app.get("/api/unified/{role}/signals")
 async def api_unified_role_signals(
@@ -5711,223 +5767,20 @@ async def api_live_rollout_set(request: Request):
     return await api_live_rollout_get()
 
 
-@app.get("/api/control/live/status")
-async def api_control_live_status():
-    return {"ok": True, **_live_gate_status(include_token=False)}
-
-
-@app.post("/api/control/live/arm")
-async def api_control_live_arm(request: Request):
-    try:
-        body = await request.json()
-        if not isinstance(body, dict):
-            body = {}
-    except Exception:
-        body = {}
-
-    trace_id = _trace_id_from_request(request)
-    schema = _schema_for_role("live")
-    _ensure_live_gate_defaults()
-    armed_at_ms = _ms_now()
-    token = secrets.token_urlsafe(9)
-    _set_setting(schema, "live_gate_state", "ARMED", source="gateway.control.live.arm")
-    _set_setting(schema, "live_gate_armed_at_ms", str(armed_at_ms), source="gateway.control.live.arm")
-    _set_setting(schema, "live_gate_confirmed_at_ms", "", source="gateway.control.live.arm")
-    _set_setting(schema, "live_gate_token", token, source="gateway.control.live.arm")
-    status = _live_gate_status(include_token=False)
-
-    await _audit_write(
-        request=request,
-        action="CONTROL_LIVE_ARM",
-        role="live",
-        target_id="live_gate",
-        trace_id=trace_id,
-        request_json=body,
-        response_json={"ok": True, "state": "ARMED", "armed_at_ms": armed_at_ms},
-        ok=True,
+app.include_router(
+    build_control_live_router(
+        schema_for_role=_schema_for_role,
+        ensure_live_gate_defaults=_ensure_live_gate_defaults,
+        ms_now=_ms_now,
+        set_setting=_set_setting,
+        live_gate_status=_live_gate_status,
+        normalize_live_allowlist=_normalize_live_allowlist,
+        normalize_live_limits=_normalize_live_limits,
+        live_limits_max=LIVE_LIMITS_MAX,
+        trace_id_from_request=_trace_id_from_request,
+        audit_write=_audit_write,
     )
-    return {"ok": True, "trace_id": trace_id, "token": token, **status}
-
-
-@app.post("/api/control/live/confirm")
-async def api_control_live_confirm(request: Request):
-    try:
-        body = await request.json()
-    except Exception:
-        body = {}
-    if not isinstance(body, dict):
-        raise HTTPException(status_code=400, detail="Body must be an object")
-
-    token = str(body.get("token") or "").strip()
-    if not token:
-        raise HTTPException(status_code=400, detail="token is required")
-
-    trace_id = _trace_id_from_request(request)
-    schema = _schema_for_role("live")
-    status_before = _live_gate_status(include_token=True)
-    gate = dict(status_before.get("gate") or {})
-    state = str(gate.get("state") or "DISARMED").upper()
-    expected_token = str(gate.get("token") or "")
-
-    if state != "ARMED":
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "error": "LIVE_GATE_NOT_ARMED",
-                "message": "live gate must be ARMED before confirmation",
-                "state": state,
-            },
-        )
-    if not expected_token or not hmac.compare_digest(token, expected_token):
-        raise HTTPException(
-            status_code=400,
-            detail={"error": "LIVE_GATE_TOKEN_INVALID", "message": "invalid live gate token"},
-        )
-
-    confirmed_at_ms = _ms_now()
-    _set_setting(schema, "live_gate_state", "CONFIRMED", source="gateway.control.live.confirm")
-    _set_setting(schema, "live_gate_confirmed_at_ms", str(confirmed_at_ms), source="gateway.control.live.confirm")
-    status = _live_gate_status(include_token=False)
-
-    await _audit_write(
-        request=request,
-        action="CONTROL_LIVE_CONFIRM",
-        role="live",
-        target_id="live_gate",
-        trace_id=trace_id,
-        request_json={"token_provided": bool(token)},
-        response_json={"ok": True, "state": "CONFIRMED", "confirmed_at_ms": confirmed_at_ms},
-        ok=True,
-    )
-    return {"ok": True, "trace_id": trace_id, **status}
-
-
-@app.post("/api/control/live/disarm")
-async def api_control_live_disarm(request: Request):
-    try:
-        body = await request.json()
-        if not isinstance(body, dict):
-            body = {}
-    except Exception:
-        body = {}
-
-    trace_id = _trace_id_from_request(request)
-    schema = _schema_for_role("live")
-    _set_setting(schema, "live_gate_state", "DISARMED", source="gateway.control.live.disarm")
-    _set_setting(schema, "live_gate_armed_at_ms", "", source="gateway.control.live.disarm")
-    _set_setting(schema, "live_gate_confirmed_at_ms", "", source="gateway.control.live.disarm")
-    _set_setting(schema, "live_gate_token", "", source="gateway.control.live.disarm")
-    status = _live_gate_status(include_token=False)
-
-    await _audit_write(
-        request=request,
-        action="CONTROL_LIVE_DISARM",
-        role="live",
-        target_id="live_gate",
-        trace_id=trace_id,
-        request_json=body,
-        response_json={"ok": True, "state": "DISARMED"},
-        ok=True,
-    )
-    return {"ok": True, "trace_id": trace_id, **status}
-
-
-@app.post("/api/control/live/allowlist")
-async def api_control_live_allowlist(request: Request):
-    try:
-        body = await request.json()
-    except Exception:
-        body = {}
-    if not isinstance(body, dict):
-        raise HTTPException(status_code=400, detail="Body must be an object")
-
-    if "symbols" not in body:
-        raise HTTPException(status_code=400, detail="symbols is required")
-    symbols = _normalize_live_allowlist(body.get("symbols"))
-
-    trace_id = _trace_id_from_request(request)
-    schema = _schema_for_role("live")
-    _set_setting(
-        schema,
-        "live_symbol_allowlist",
-        json.dumps(symbols, ensure_ascii=True, separators=(",", ":")),
-        source="gateway.control.live.allowlist",
-    )
-    status = _live_gate_status(include_token=False)
-
-    await _audit_write(
-        request=request,
-        action="CONTROL_LIVE_ALLOWLIST",
-        role="live",
-        target_id="live_symbol_allowlist",
-        trace_id=trace_id,
-        request_json={"symbols": symbols},
-        response_json={"ok": True, "count": len(symbols)},
-        ok=True,
-    )
-    return {"ok": True, "trace_id": trace_id, **status}
-
-
-@app.post("/api/control/live/limits")
-async def api_control_live_limits(request: Request):
-    try:
-        body = await request.json()
-    except Exception:
-        body = {}
-    if not isinstance(body, dict):
-        raise HTTPException(status_code=400, detail="Body must be an object")
-
-    current = _normalize_live_limits((_live_gate_status(include_token=False).get("limits") or {}))
-    updated = dict(current)
-
-    if "max_open_positions" in body:
-        try:
-            v = int(float(body.get("max_open_positions")))
-        except Exception:
-            raise HTTPException(status_code=400, detail="max_open_positions must be numeric")
-        if v < 0 or v > int(LIVE_LIMITS_MAX["max_open_positions"]):
-            raise HTTPException(status_code=400, detail=f"max_open_positions must be between 0 and {int(LIVE_LIMITS_MAX['max_open_positions'])}")
-        updated["max_open_positions"] = int(v)
-
-    if "max_notional" in body:
-        try:
-            v = float(body.get("max_notional"))
-        except Exception:
-            raise HTTPException(status_code=400, detail="max_notional must be numeric")
-        if v < 0 or v > float(LIVE_LIMITS_MAX["max_notional"]):
-            raise HTTPException(status_code=400, detail=f"max_notional must be between 0 and {float(LIVE_LIMITS_MAX['max_notional'])}")
-        updated["max_notional"] = float(v)
-
-    if "max_daily_loss" in body:
-        try:
-            v = float(body.get("max_daily_loss"))
-        except Exception:
-            raise HTTPException(status_code=400, detail="max_daily_loss must be numeric")
-        if v < 0 or v > float(LIVE_LIMITS_MAX["max_daily_loss"]):
-            raise HTTPException(status_code=400, detail=f"max_daily_loss must be between 0 and {float(LIVE_LIMITS_MAX['max_daily_loss'])}")
-        updated["max_daily_loss"] = float(v)
-
-    trace_id = _trace_id_from_request(request)
-    schema = _schema_for_role("live")
-    _set_setting(
-        schema,
-        "live_limits",
-        json.dumps(updated, ensure_ascii=True, separators=(",", ":")),
-        source="gateway.control.live.limits",
-    )
-    status = _live_gate_status(include_token=False)
-
-    await _audit_write(
-        request=request,
-        action="CONTROL_LIVE_LIMITS",
-        role="live",
-        target_id="live_limits",
-        trace_id=trace_id,
-        request_json=body,
-        response_json={"ok": True, "limits": updated},
-        ok=True,
-    )
-    return {"ok": True, "trace_id": trace_id, **status}
+)
 
 
 def _strategies_payload(role: str = "all") -> Dict[str, Any]:
@@ -10368,6 +10221,26 @@ async def ui_root():
 @app.get("/ui/ops")
 async def ui_ops(request: Request):
     return _ui_template(request, "ops.html", "Ops Live")
+
+
+@app.get("/ui/ops/observability")
+async def ui_ops_observability(request: Request):
+    return _ui_template(request, "ops_observability.html", "Ops Observability")
+
+
+@app.get("/ui/ops/live-control")
+async def ui_ops_live_control(request: Request):
+    return _ui_template(request, "ops_live_control.html", "Live Control")
+
+
+@app.get("/ui/ops/dead-letters")
+async def ui_ops_dead_letters(request: Request):
+    return _ui_template(request, "ops_dead_letters.html", "Dead Letters")
+
+
+@app.get("/ui/ops/commands")
+async def ui_ops_commands(request: Request):
+    return _ui_template(request, "ops_commands.html", "Commands")
 
 
 @app.get("/ui/portfolio")
