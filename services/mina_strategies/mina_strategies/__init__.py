@@ -1,0 +1,1 @@
+"""Mina strategies skeleton publisher."""
